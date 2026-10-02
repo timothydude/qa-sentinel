@@ -1,0 +1,14 @@
+name: QA Sentinel
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 10 * * *"
+
+jobs:
+  qa-sentinel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wake up QA Sentinel
+        run: echo "QA Sentinel is awake."
