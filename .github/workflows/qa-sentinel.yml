@@ -37,18 +37,27 @@ jobs:
 
           echo "$RESPONSE" | jq -r '
             .issues[] |
+
             "========================================",
             "\(.key) - \(.fields.summary)",
             "Updated: \(.fields.updated)",
             "",
             "Description:",
+            "",
             (
-              if .fields.description == null then
-                "No description provided"
+              .fields.description.content[]? |
+              if .type == "paragraph" then
+                ([.content[]?.text] | join(""))
+              elif .type == "bulletList" then
+                (
+                  .content[]? |
+                  "• " +
+                  (
+                    .content[]?.content[]?.text
+                  )
+                )
               else
-                [
-                  .fields.description.content[]?.content[]?.text
-                ] | join("")
+                ""
               end
             ),
             ""
