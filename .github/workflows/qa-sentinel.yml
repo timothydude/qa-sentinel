@@ -22,8 +22,7 @@ jobs:
 
           JQL="project = $JIRA_PROJECT_KEY AND updated >= -1d ORDER BY updated DESC"
 
-
-   	RESPONSE=$(curl -s \
+          RESPONSE=$(curl -s \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -G \
             -H "Accept: application/json" \
@@ -32,6 +31,7 @@ jobs:
             --data-urlencode "fields=key,summary,updated" \
             "$JIRA_URL/rest/api/3/search/jql")
 
+          echo ""
           echo "Recently updated Jira issues:"
           echo ""
 
