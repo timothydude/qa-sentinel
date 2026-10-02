@@ -10,18 +10,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check Jira connection
+      - name: Find recently updated Jira issues
         env:
           JIRA_URL: ${{ secrets.JIRA_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+
         run: |
-          echo "Connecting to Jira..."
+          echo "Checking Jira for recently updated issues..."
+
+          JQL="project = $JIRA_PROJECT_KEY AND updated >= -1d ORDER BY updated DESC"
 
           RESPONSE=$(curl -s \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -G \
             -H "Accept: application/json" \
-            "$JIRA_URL/rest/api/3/project/$JIRA_PROJECT_KEY")
+            --data-urlencode "jql=$JQL" \
+            --data-urlencode "maxResults=50" \
+            "$JIRA_URL/rest/api/3/search/jql")
 
           echo "$RESPONSE"
