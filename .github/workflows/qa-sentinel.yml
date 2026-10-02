@@ -28,11 +28,20 @@ jobs:
             -H "Accept: application/json" \
             --data-urlencode "jql=$JQL" \
             --data-urlencode "maxResults=50" \
-            --data-urlencode "fields=key,summary,updated" \
+            --data-urlencode "fields=summary,description,updated" \
             "$JIRA_URL/rest/api/3/search/jql")
 
           echo ""
           echo "Recently updated Jira issues:"
           echo ""
 
-          echo "$RESPONSE" | jq -r '.issues[] | "\(.key) - \(.fields.summary)"'
+          echo "$RESPONSE" | jq -r '
+            .issues[] |
+            "========================================",
+            "\(.key) - \(.fields.summary)",
+            "Updated: \(.fields.updated)",
+            "",
+            "Description:",
+            (.fields.description // "No description provided"),
+            ""
+          '
