@@ -42,6 +42,14 @@ jobs:
             "Updated: \(.fields.updated)",
             "",
             "Description:",
-            (.fields.description // "No description provided"),
+            (
+              if .fields.description == null then
+                "No description provided"
+              else
+                [
+                  .fields.description.content[]?.content[]?.text
+                ] | join("")
+              end
+            ),
             ""
           '
