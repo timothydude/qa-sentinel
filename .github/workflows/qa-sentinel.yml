@@ -30,7 +30,4 @@ jobs:
             --data-urlencode "maxResults=50" \
             "$JIRA_URL/rest/api/3/search/jql")
 
-          echo "Recently updated Jira issues:"
-          echo ""
-
-          echo "$RESPONSE" | jq -r '.issues[] | "\(.key) - \(.fields.summary)"'
+          echo "$RESPONSE"
