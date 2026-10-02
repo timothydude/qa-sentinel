@@ -10,5 +10,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Wake up QA Sentinel
-        run: echo "QA Sentinel is awake."
+      - name: Check Jira connection
+        env:
+          JIRA_URL: ${{ secrets.JIRA_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+        run: |
+          echo "Connecting to Jira..."
+
+          RESPONSE=$(curl -s \
+            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -H "Accept: application/json" \
+            "$JIRA_URL/rest/api/3/project/$JIRA_PROJECT_KEY")
+
+          echo "$RESPONSE"
