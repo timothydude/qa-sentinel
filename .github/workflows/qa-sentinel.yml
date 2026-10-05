@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Find recently updated Jira issues
+      - name: Find recently updated Jira issues and their changes
         env:
           JIRA_URL: ${{ secrets.JIRA_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
@@ -18,7 +18,12 @@ jobs:
           JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
 
         run: |
+          echo "========================================"
+          echo "QA Sentinel"
+          echo "========================================"
+          echo ""
           echo "Checking Jira for recently updated issues..."
+          echo ""
 
           JQL="project = $JIRA_PROJECT_KEY AND updated >= -1d ORDER BY updated DESC"
 
@@ -31,34 +36,63 @@ jobs:
             --data-urlencode "fields=summary,description,updated" \
             "$JIRA_URL/rest/api/3/search/jql")
 
+          ISSUE_COUNT=$(echo "$RESPONSE" | jq '.issues | length')
+
+          echo "Found $ISSUE_COUNT recently updated issue(s)."
           echo ""
-          echo "Recently updated Jira issues:"
-          echo ""
+
+          if [ "$ISSUE_COUNT" -eq 0 ]; then
+            echo "No recently updated Jira issues found."
+            exit 0
+          fi
+
+          echo "========================================"
+          echo "Recently Updated Issues"
+          echo "========================================"
 
           echo "$RESPONSE" | jq -r '
             .issues[] |
-
-            "========================================",
-            "\(.key) - \(.fields.summary)",
-            "Updated: \(.fields.updated)",
-            "",
-            "Description:",
-            "",
-            (
-              .fields.description.content[]? |
-              if .type == "paragraph" then
-                ([.content[]?.text] | join(""))
-              elif .type == "bulletList" then
-                (
-                  .content[]? |
-                  "• " +
-                  (
-                    .content[]?.content[]?.text
-                  )
-                )
-              else
-                ""
-              end
-            ),
-            ""
+            "\(.key) - \(.fields.summary)\nUpdated: \(.fields.updated)\n"
           '
+
+          echo ""
+          echo "========================================"
+          echo "Jira Changelog"
+          echo "========================================"
+
+          echo "$RESPONSE" | jq -r '.issues[].key' | while read ISSUE_KEY; do
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Issue: $ISSUE_KEY"
+            echo "----------------------------------------"
+
+            CHANGELOG=$(curl -s \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -G \
+              -H "Accept: application/json" \
+              --data-urlencode "maxResults=100" \
+              "$JIRA_URL/rest/api/3/issue/$ISSUE_KEY/changelog")
+
+            echo "$CHANGELOG" | jq -r '
+              if (.values | length) == 0 then
+                "No changelog entries found."
+              else
+                .values[] |
+                "Changed: \(.created)",
+                (
+                  .items[] |
+                  "  Field:  \(.field)",
+                  "  Before: \(.fromString // "N/A")",
+                  "  After:   \(.toString // "N/A")",
+                  ""
+                )
+              end
+            '
+
+          done
+
+          echo ""
+          echo "========================================"
+          echo "QA Sentinel completed"
+          echo "========================================"
