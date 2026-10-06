@@ -74,21 +74,21 @@ jobs:
               --data-urlencode "maxResults=100" \
               "$JIRA_URL/rest/api/3/issue/$ISSUE_KEY/changelog")
 
-echo "$CHANGELOG" | jq -r '
-  if (.values | length) == 0 then
-    "No changelog entries found."
-  else
-    .values[] |
-    "Changed: \(.created)",
-    (
-      .items[] |
-      "  Field:  \(.field)",
-      "  Before: \(.fromString // "N/A")",
-      "  After:   \(.toString // "N/A")",
-      ""
-    )
-  end
-'
+            echo "$CHANGELOG" | jq -r '
+              if (.values | length) == 0 then
+                "No changelog entries found."
+              else
+                .values[] |
+                "Changed: \(.created)",
+                (
+                  .items[] |
+                  "  Field:  \(.field)",
+                  "  Before: \(.fromString // "N/A")",
+                  "  After:   \(.toString // "N/A")",
+                  ""
+                )
+              end
+            '
 
           done
 
