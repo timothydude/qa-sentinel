@@ -79,14 +79,23 @@ jobs:
                 "No changelog entries found."
               else
                 .values[] |
+                .items[] |
+                select(
+                  .field == "summary" or
+                  .field == "description" or
+                  (.field | ascii_downcase | contains("acceptance")) or
+                  .field == "priority" or
+                  .field == "status" or
+                  .field == "assignee" or
+                  .field == "labels" or
+                  .field == "components" or
+                  (.field | ascii_downcase | contains("fix version"))
+                ) |
                 "Changed: \(.created)",
-                (
-                  .items[] |
-                  "  Field:  \(.field)",
-                  "  Before: \(.fromString // "N/A")",
-                  "  After:   \(.toString // "N/A")",
-                  ""
-                )
+                "  Field:  \(.field)",
+                "  Before: \(.fromString // "N/A")",
+                "  After:  \(.toString // "N/A")",
+                ""
               end
             '
 
