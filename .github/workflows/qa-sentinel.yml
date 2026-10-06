@@ -2,133 +2,220 @@ name: QA Sentinel
 
 on:
   workflow_dispatch:
+    inputs:
+      hours:
+        description: "Look-back window in hours"
+        required: false
+        default: "24"
   schedule:
     - cron: "0 10 * * *"
+
+permissions: {}
 
 jobs:
   qa-sentinel:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Find recently updated Jira issues and their changes
+      - name: Detect QA-relevant Jira changes
         env:
           JIRA_URL: ${{ secrets.JIRA_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
-
+          WINDOW_HOURS: ${{ inputs.hours || '24' }}
         run: |
-          echo "========================================"
-          echo "QA Sentinel"
-          echo "========================================"
-          echo ""
-          echo "Checking Jira for recently updated issues..."
-          echo ""
+          python3 - <<'PYTHON'
+          import base64
+          import difflib
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timedelta, timezone
 
-          JQL="project = $JIRA_PROJECT_KEY AND updated >= -1d ORDER BY updated DESC"
+          JIRA_URL = os.environ["JIRA_URL"].rstrip("/")
+          EMAIL = os.environ["JIRA_EMAIL"]
+          TOKEN = os.environ["JIRA_API_TOKEN"]
+          PROJECT = os.environ["JIRA_PROJECT_KEY"]
+          HOURS = int(os.environ.get("WINDOW_HOURS") or 24)
 
-          RESPONSE=$(curl -s \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -G \
-            -H "Accept: application/json" \
-            --data-urlencode "jql=$JQL" \
-            --data-urlencode "maxResults=50" \
-            --data-urlencode "fields=summary,description,updated" \
-            "$JIRA_URL/rest/api/3/search/jql")
+          for name, value in (("JIRA_URL", JIRA_URL), ("JIRA_EMAIL", EMAIL),
+                              ("JIRA_API_TOKEN", TOKEN), ("JIRA_PROJECT_KEY", PROJECT)):
+              if not value:
+                  sys.exit(f"ERROR: {name} is empty. Check repo secrets/variables.")
 
-          ISSUE_COUNT=$(echo "$RESPONSE" | jq '.issues | length')
+          AUTH = "Basic " + base64.b64encode(f"{EMAIL}:{TOKEN}".encode()).decode()
+          CUTOFF = datetime.now(timezone.utc) - timedelta(hours=HOURS)
 
-          echo "Found $ISSUE_COUNT recently updated issue(s)."
-          echo ""
+          WATCHED = {
+              "summary", "description", "priority", "status",
+              "assignee", "labels", "components",
+          }
 
-          if [ "$ISSUE_COUNT" -eq 0 ]; then
-            echo "No recently updated Jira issues found."
-            exit 0
-          fi
 
-          echo "========================================"
-          echo "Recently Updated Issues"
-          echo "========================================"
+          def is_watched(field):
+              f = (field or "").lower()
+              return f in WATCHED or "acceptance" in f or "fix version" in f
 
-          echo "$RESPONSE" | jq -r '
-            .issues[] |
-            "\(.key) - \(.fields.summary)\nUpdated: \(.fields.updated)\n"
-          '
 
-          echo ""
-          echo "========================================"
-          echo "Jira Changelog - Today's Changes"
-          echo "========================================"
-
-          # Get today's date in UTC
-          TODAY=$(date -u +"%Y-%m-%d")
-
-          echo "Checking changelog entries for: $TODAY"
-          echo ""
-
-          echo "$RESPONSE" | jq -r '.issues[].key' | while read ISSUE_KEY; do
-
-            echo ""
-            echo "----------------------------------------"
-            echo "Issue: $ISSUE_KEY"
-            echo "----------------------------------------"
-
-            CHANGELOG=$(curl -s \
-              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-              -G \
-              -H "Accept: application/json" \
-              --data-urlencode "maxResults=100" \
-              "$JIRA_URL/rest/api/3/issue/$ISSUE_KEY/changelog")
-
-            TODAY_CHANGES=$(echo "$CHANGELOG" | jq --arg TODAY "$TODAY" '
-              [
-                .values[]
-                | select((.created // "") | startswith($TODAY))
-                | {
-                    created: .created,
-                    author: .author.displayName,
-                    items: [
-                      .items[]
-                      | select(
-                          .field == "summary" or
-                          .field == "description" or
-                          (.field | ascii_downcase | contains("acceptance")) or
-                          .field == "priority" or
-                          .field == "status" or
-                          .field == "assignee" or
-                          .field == "labels" or
-                          .field == "components" or
-                          (.field | ascii_downcase | contains("fix version"))
-                        )
-                    ]
-                  }
-                | select(.items | length > 0)
-              ]
-            ')
-
-            CHANGE_COUNT=$(echo "$TODAY_CHANGES" | jq 'length')
-
-            if [ "$CHANGE_COUNT" -eq 0 ]; then
-              echo "No QA-relevant changes found today."
-              continue
-            fi
-
-            echo "$TODAY_CHANGES" | jq -r '
-              .[] |
-              "Changed: \(.created)",
-              "Changed by: \(.author)",
-              (
-                .items[] |
-                "  Field:  \(.field)",
-                "  Before: \(.fromString // "N/A")",
-                "  After:  \(.toString // "N/A")",
-                ""
+          def api_get(path, params):
+              url = f"{JIRA_URL}{path}?{urllib.parse.urlencode(params)}"
+              req = urllib.request.Request(
+                  url, headers={"Authorization": AUTH, "Accept": "application/json"}
               )
-            '
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      return json.load(resp)
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode(errors="replace")[:500]
+                  sys.exit(f"ERROR: Jira returned HTTP {e.code} for {path}\n{body}")
+              except urllib.error.URLError as e:
+                  sys.exit(f"ERROR: could not reach Jira for {path}: {e.reason}")
 
-          done
 
-          echo ""
-          echo "========================================"
-          echo "QA Sentinel completed"
-          echo "========================================"
+          def parse_jira_time(value):
+              # Jira format: 2026-10-06T14:20:11.123+0800
+              for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+                  try:
+                      return datetime.strptime(value, fmt)
+                  except ValueError:
+                      continue
+              return datetime.fromisoformat(value)
+
+
+          def search_issues():
+              jql = (f'project = "{PROJECT}" AND updated >= -{HOURS}h '
+                     "ORDER BY updated DESC")
+              issues, token = [], None
+              while True:
+                  params = {"jql": jql, "maxResults": 100, "fields": "summary,updated"}
+                  if token:
+                      params["nextPageToken"] = token
+                  data = api_get("/rest/api/3/search/jql", params)
+                  issues.extend(data.get("issues", []))
+                  token = data.get("nextPageToken")
+                  if data.get("isLast", True) or not token:
+                      return issues
+
+
+          def get_changelog(key):
+              values, start = [], 0
+              while True:
+                  data = api_get(f"/rest/api/3/issue/{key}/changelog",
+                                 {"startAt": start, "maxResults": 100})
+                  page = data.get("values", [])
+                  values.extend(page)
+                  start += len(page)
+                  if data.get("isLast", True) or not page:
+                      return values
+
+
+          def show_item(created, author, item):
+              field = item.get("field", "Unknown")
+              before = item.get("fromString") or ""
+              after = item.get("toString") or ""
+              before_lines = before.splitlines()
+              after_lines = after.splitlines()
+
+              added, removed, changed_before, changed_after = [], [], [], []
+              matcher = difflib.SequenceMatcher(None, before_lines, after_lines)
+              for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                  if tag == "delete":
+                      removed.extend(before_lines[i1:i2])
+                  elif tag == "insert":
+                      added.extend(after_lines[j1:j2])
+                  elif tag == "replace":
+                      changed_before.extend(before_lines[i1:i2])
+                      changed_after.extend(after_lines[j1:j2])
+
+              print("\n========================================")
+              print("QA Change Detected")
+              print("========================================\n")
+              print(f"Changed:    {created}")
+              print(f"Changed by: {author}")
+              print(f"Field:      {field}\n")
+
+              shown = False
+              if changed_before or changed_after:
+                  shown = True
+                  print("----------------------------------------")
+                  print("CHANGED")
+                  print("----------------------------------------\n")
+                  print("BEFORE:")
+                  for line in changed_before:
+                      print(f"- {line}")
+                  print("\nAFTER:")
+                  for line in changed_after:
+                      print(f"+ {line}")
+                  print()
+              if removed:
+                  shown = True
+                  print("----------------------------------------")
+                  print("REMOVED")
+                  print("----------------------------------------\n")
+                  for line in removed:
+                      print(f"- {line}")
+                  print()
+              if added:
+                  shown = True
+                  print("----------------------------------------")
+                  print("ADDED")
+                  print("----------------------------------------\n")
+                  for line in added:
+                      print(f"+ {line}")
+                  print()
+              if not shown and before != after:
+                  print("----------------------------------------")
+                  print("VALUE CHANGED")
+                  print("----------------------------------------\n")
+                  print(f"BEFORE: {before}")
+                  print(f"AFTER:  {after}\n")
+
+
+          print("========================================")
+          print("QA Sentinel")
+          print("========================================\n")
+          print(f"Project: {PROJECT}")
+          print(f"Window:  last {HOURS}h (since {CUTOFF:%Y-%m-%d %H:%M} UTC)\n")
+
+          issues = search_issues()
+          print(f"Found {len(issues)} recently updated issue(s).\n")
+          if not issues:
+              print("No recently updated Jira issues found.")
+              sys.exit(0)
+
+          total_changes = 0
+          for issue in issues:
+              key = issue["key"]
+              summary = issue["fields"].get("summary", "")
+              relevant = []
+              for entry in get_changelog(key):
+                  created = entry.get("created")
+                  if not created or parse_jira_time(created) < CUTOFF:
+                      continue
+                  items = [i for i in entry.get("items", []) if is_watched(i.get("field"))]
+                  if items:
+                      author = (entry.get("author") or {}).get("displayName", "Unknown")
+                      relevant.append((created, author, items))
+
+              print("----------------------------------------")
+              print(f"Issue:   {key}")
+              print(f"Summary: {summary}")
+              print("----------------------------------------")
+              if not relevant:
+                  print("No QA-relevant changes in this window.\n")
+                  continue
+              for created, author, items in relevant:
+                  for item in items:
+                      total_changes += 1
+                      show_item(created, author, item)
+
+          print("========================================")
+          print(f"QA Sentinel completed: {total_changes} QA-relevant change(s) "
+                f"across {len(issues)} issue(s)")
+          print("========================================")
+          PYTHON
