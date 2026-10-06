@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Find recently updated Jira issues and detect actual changes
+      - name: Find recently updated Jira issues and their changes
         env:
           JIRA_URL: ${{ secrets.JIRA_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
@@ -57,21 +57,20 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "QA Change Detection"
+          echo "Jira Changelog - Today's Changes"
           echo "========================================"
 
+          # Get today's date in UTC
           TODAY=$(date -u +"%Y-%m-%d")
 
-          echo "Checking changes made on: $TODAY"
+          echo "Checking changelog entries for: $TODAY"
           echo ""
 
-          echo "$RESPONSE" | jq -r '.issues[] | [.key, .fields.summary] | @tsv' |
-          while IFS=$'\t' read -r ISSUE_KEY ISSUE_SUMMARY; do
+          echo "$RESPONSE" | jq -r '.issues[].key' | while read ISSUE_KEY; do
 
             echo ""
             echo "----------------------------------------"
             echo "Issue: $ISSUE_KEY"
-            echo "Summary: $ISSUE_SUMMARY"
             echo "----------------------------------------"
 
             CHANGELOG=$(curl -s \
@@ -81,161 +80,51 @@ jobs:
               --data-urlencode "maxResults=100" \
               "$JIRA_URL/rest/api/3/issue/$ISSUE_KEY/changelog")
 
-            TODAY_CHANGES=$(echo "$CHANGELOG" | jq -c --arg TODAY "$TODAY" '
-              .values[]
-              | select((.created // "") | startswith($TODAY))
-              | {
-                  created: .created,
-                  author: (.author.displayName // "Unknown"),
-                  items: [
-                    .items[]
-                    | select(
-                        .field == "summary" or
-                        .field == "description" or
-                        (.field | ascii_downcase | contains("acceptance")) or
-                        .field == "priority" or
-                        .field == "status" or
-                        .field == "assignee" or
-                        .field == "labels" or
-                        .field == "components" or
-                        (.field | ascii_downcase | contains("fix version"))
-                      )
-                  ]
-                }
-              | select(.items | length > 0)
+            TODAY_CHANGES=$(echo "$CHANGELOG" | jq --arg TODAY "$TODAY" '
+              [
+                .values[]
+                | select((.created // "") | startswith($TODAY))
+                | {
+                    created: .created,
+                    author: .author.displayName,
+                    items: [
+                      .items[]
+                      | select(
+                          .field == "summary" or
+                          .field == "description" or
+                          (.field | ascii_downcase | contains("acceptance")) or
+                          .field == "priority" or
+                          .field == "status" or
+                          .field == "assignee" or
+                          .field == "labels" or
+                          .field == "components" or
+                          (.field | ascii_downcase | contains("fix version"))
+                        )
+                    ]
+                  }
+                | select(.items | length > 0)
+              ]
             ')
 
-            CHANGE_COUNT=$(echo "$TODAY_CHANGES" | grep -c . || true)
+            CHANGE_COUNT=$(echo "$TODAY_CHANGES" | jq 'length')
 
             if [ "$CHANGE_COUNT" -eq 0 ]; then
               echo "No QA-relevant changes found today."
               continue
             fi
 
-            echo "$TODAY_CHANGES" |
-            while IFS= read -r CHANGE_ENTRY; do
-
-              export CHANGE_ENTRY
-
-              python3 <<'PYTHON'
-import os
-import json
-import difflib
-
-change = json.loads(os.environ["CHANGE_ENTRY"])
-
-created = change.get("created", "Unknown")
-author = change.get("author", "Unknown")
-
-for item in change.get("items", []):
-
-    field = item.get("field", "Unknown")
-    before = item.get("fromString") or ""
-    after = item.get("toString") or ""
-
-    # Split into lines while preserving meaningful blank lines
-    before_lines = before.splitlines()
-    after_lines = after.splitlines()
-
-    matcher = difflib.SequenceMatcher(
-        None,
-        before_lines,
-        after_lines
-    )
-
-    added = []
-    removed = []
-    changed_before = []
-    changed_after = []
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-
-        if tag == "delete":
-            removed.extend(before_lines[i1:i2])
-
-        elif tag == "insert":
-            added.extend(after_lines[j1:j2])
-
-        elif tag == "replace":
-            changed_before.extend(before_lines[i1:i2])
-            changed_after.extend(after_lines[j1:j2])
-
-    print("")
-    print("========================================")
-    print("QA Change Detected")
-    print("========================================")
-    print("")
-    print(f"Changed:    {created}")
-    print(f"Changed by: {author}")
-    print(f"Field:      {field}")
-    print("")
-
-    has_change = False
-
-    # Modified text
-    if changed_before or changed_after:
-        has_change = True
-
-        print("----------------------------------------")
-        print("CHANGED")
-        print("----------------------------------------")
-        print("")
-        print("BEFORE:")
-        for line in changed_before:
-            print(f"- {line}")
-
-        print("")
-        print("AFTER:")
-        for line in changed_after:
-            print(f"+ {line}")
-
-        print("")
-
-    # Removed text
-    if removed:
-        has_change = True
-
-        print("----------------------------------------")
-        print("REMOVED")
-        print("----------------------------------------")
-        print("")
-
-        for line in removed:
-            print(f"- {line}")
-
-        print("")
-
-    # Added text
-    if added:
-        has_change = True
-
-        print("----------------------------------------")
-        print("ADDED")
-        print("----------------------------------------")
-        print("")
-
-        for line in added:
-            print(f"+ {line}")
-
-        print("")
-
-    # Handle fields where Jira reports a change but
-    # the line-based comparison found nothing unusual.
-    if not has_change and before != after:
-        print("----------------------------------------")
-        print("VALUE CHANGED")
-        print("----------------------------------------")
-        print("")
-        print("BEFORE:")
-        print(before)
-        print("")
-        print("AFTER:")
-        print(after)
-        print("")
-
-PYTHON
-
-            done
+            echo "$TODAY_CHANGES" | jq -r '
+              .[] |
+              "Changed: \(.created)",
+              "Changed by: \(.author)",
+              (
+                .items[] |
+                "  Field:  \(.field)",
+                "  Before: \(.fromString // "N/A")",
+                "  After:  \(.toString // "N/A")",
+                ""
+              )
+            '
 
           done
 
