@@ -54,7 +54,7 @@ jobs:
           )
 
           try:
-              with urllib.request.urlopen(request, timeout=30) as response:
+              with urllib.request.urlopen(request, timeout=120) as response:
                   result = json.load(response)
 
               answer = (
