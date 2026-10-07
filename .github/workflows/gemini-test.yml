@@ -1,102 +1,100 @@
-name: Gemini QA Analysis Test
+steps:
+  - name: Test Gemini QA Analysis
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    run: |
+      python3 - <<'PYTHON'
+      import json
+      import os
+      import urllib.request
+      import urllib.error
 
-on:
-  workflow_dispatch:
+      API_KEY = os.environ["GEMINI_API_KEY"]
 
-jobs:
-  gemini-test:
-    runs-on: ubuntu-latest
+      url = (
+          "https://generativelanguage.googleapis.com/v1beta/"
+          "models/gemini-3.8-flash:generateContent"
+          f"?key={API_KEY}"
+      )
 
-    steps:
-      - name: Test Gemini with Jira Change
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python3 - <<'PYTHON'
-          import os
-          import urllib.request
-          import json
+      prompt = """
+      You are QA Sentinel, an AI assistant helping software testers
+      understand changes made to Jira user stories.
 
-          api_key = os.environ["GEMINI_API_KEY"]
+      Analyse the following Jira change from a software QA perspective.
 
-          prompt = """
-          You are QA Sentinel, an AI assistant helping software testers understand
-          changes made to Jira user stories.
+      Jira Issue:
+      KAN-175 - Choose account type and enter contact details
 
-          Analyse the following Jira change from a software QA perspective.
+      Field Changed:
+      Description
 
-          Jira Issue:
-          KAN-175 - Choose account type and enter contact details
+      PREVIOUS TEXT:
+      As a prospective customer, I want to choose Individual or Business
+      and enter my email and phone number, so that the firm knows who is
+      applying and how to reach me.
 
-          Field Changed:
-          Description
+      Acceptance criteria:
+      It has been agreed that the last point is relevant.
+      Please inform Jones to update the document.
 
-          PREVIOUS TEXT:
-          "As a prospective customer, I want to choose Individual or Business
-          and enter my email and phone number, so that the firm knows who is
-          applying and how to reach me.
+      NEW TEXT:
+      As a prospective customer, I want to choose Individual or Business
+      and enter my email and phone number, so that the firm knows who is
+      applying and how to reach me.
 
-          Acceptance criteria:
-          It has been agreed that the last point is relevant.
-          Please inform Jones to update the document."
+      Acceptance criteria:
+      It has been agreed that the last point is no longer relevant.
 
-          NEW TEXT:
-          "As a prospective customer, I want to choose Individual or Business
-          and enter my email and phone number, so that the firm knows who is
-          applying and how to reach me.
+      Please provide:
 
-          Acceptance criteria:
-          It has been agreed that the last point is no longer relevant."
+      1. QA IMPACT
+      State whether the change has Low, Medium, or High QA impact.
 
-          Please provide:
+      2. ACTION REQUIRED
+      State whether QA needs to take action.
 
-          1. QA IMPACT
-          State whether the change has Low, Medium, or High QA impact.
+      3. TEST CASE IMPACT
+      Explain whether existing test cases may need to be reviewed or changed.
 
-          2. ACTION REQUIRED
-          State whether QA needs to take action.
+      4. RECOMMENDATION
+      Give the recommended QA action.
 
-          3. TEST CASE IMPACT
-          Explain whether existing test cases may need to be reviewed or changed.
+      5. REASON
+      Briefly explain why.
 
-          4. RECOMMENDATION
-          Give the recommended QA action.
+      Keep the response concise and practical for a software tester.
+      """
 
-          5. REASON
-          Briefly explain why.
+      payload = {
+          "contents": [
+              {
+                  "parts": [
+                      {
+                          "text": prompt
+                      }
+                  ]
+              }
+          ]
+      }
 
-          Keep the response concise and practical for a software tester.
-          """
+      data = json.dumps(payload).encode()
 
-          data = {
-              "contents": [
-                  {
-                      "parts": [
-                          {
-                              "text": prompt
-                          }
-                      ]
-                  }
-              ]
-          }
+      request = urllib.request.Request(
+          url,
+          data=data,
+          headers={"Content-Type": "application/json"},
+          method="POST"
+      )
 
-          url = (
-              "https://generativelanguage.googleapis.com/v1beta/"
-              "models/gemini-3.8-flash:generateContent"
-              f"?key={api_key}"
+      try:
+          with urllib.request.urlopen(request, timeout=30) as response:
+              result = json.load(response)
+
+          answer = (
+              result["candidates"][0]
+              ["content"]["parts"][0]["text"]
           )
-
-          request = urllib.request.Request(
-              url,
-              data=json.dumps(data).encode("utf-8"),
-              headers={"Content-Type": "application/json"},
-              method="POST"
-          )
-
-          with urllib.request.urlopen(request) as response:
-              result = json.loads(response.read().decode("utf-8"))
-
-          answer = result["candidates"][0]["content"]["parts"][0]["text"]
 
           print("========================================")
           print("Gemini QA Analysis Test")
@@ -107,4 +105,17 @@ jobs:
           print("========================================")
           print("Gemini QA analysis completed.")
           print("========================================")
-          PYTHON
+
+      except urllib.error.HTTPError as e:
+          body = e.read().decode(errors="replace")
+
+          print("Gemini API returned an error.")
+          print(f"HTTP status: {e.code}")
+          print(body)
+
+          raise SystemExit(1)
+
+      except Exception as e:
+          print(f"ERROR: {e}")
+          raise SystemExit(1)
+      PYTHON
