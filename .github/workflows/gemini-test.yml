@@ -1,0 +1,85 @@
+name: Gemini API Test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test-gemini:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test Gemini API
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import urllib.request
+          import urllib.error
+
+          API_KEY = os.environ["GEMINI_API_KEY"]
+
+          url = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-2.5-flash:generateContent"
+              f"?key={API_KEY}"
+          )
+
+          payload = {
+              "contents": [
+                  {
+                      "parts": [
+                          {
+                              "text": (
+                                  "You are QA Sentinel. "
+                                  "Reply with exactly: "
+                                  "Gemini connection successful."
+                              )
+                          }
+                      ]
+                  }
+              ]
+          }
+
+          data = json.dumps(payload).encode()
+
+          request = urllib.request.Request(
+              url,
+              data=data,
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+
+              answer = (
+                  result["candidates"][0]
+                  ["content"]["parts"][0]["text"]
+              )
+
+              print("========================================")
+              print("Gemini API Test")
+              print("========================================")
+              print()
+              print("Response from Gemini:")
+              print(answer)
+              print()
+              print("Gemini API connection successful.")
+              print("========================================")
+
+          except urllib.error.HTTPError as e:
+              body = e.read().decode(errors="replace")
+              print("Gemini API returned an error.")
+              print(f"HTTP status: {e.code}")
+              print(body)
+              raise SystemExit(1)
+
+          except Exception as e:
+              print(f"ERROR: {e}")
+              raise SystemExit(1)
+          PYTHON
