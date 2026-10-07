@@ -1,85 +1,110 @@
-name: Gemini API Test
+name: Gemini QA Analysis Test
 
 on:
   workflow_dispatch:
 
-permissions: {}
-
 jobs:
-  test-gemini:
+  gemini-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Gemini API
+      - name: Test Gemini with Jira Change
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - <<'PYTHON'
-          import json
           import os
           import urllib.request
-          import urllib.error
+          import json
 
-          API_KEY = os.environ["GEMINI_API_KEY"]
+          api_key = os.environ["GEMINI_API_KEY"]
 
-          url = (
-              "https://generativelanguage.googleapis.com/v1beta/"
-              "models/gemini-3.8-flash:generateContent"
-              f"?key={API_KEY}"
-          )
+          prompt = """
+          You are QA Sentinel, an AI assistant helping software testers understand
+          changes made to Jira user stories.
 
-          payload = {
+          Analyse the following Jira change from a software QA perspective.
+
+          Jira Issue:
+          KAN-175 - Choose account type and enter contact details
+
+          Field Changed:
+          Description
+
+          PREVIOUS TEXT:
+          "As a prospective customer, I want to choose Individual or Business
+          and enter my email and phone number, so that the firm knows who is
+          applying and how to reach me.
+
+          Acceptance criteria:
+          It has been agreed that the last point is relevant.
+          Please inform Jones to update the document."
+
+          NEW TEXT:
+          "As a prospective customer, I want to choose Individual or Business
+          and enter my email and phone number, so that the firm knows who is
+          applying and how to reach me.
+
+          Acceptance criteria:
+          It has been agreed that the last point is no longer relevant."
+
+          Please provide:
+
+          1. QA IMPACT
+          State whether the change has Low, Medium, or High QA impact.
+
+          2. ACTION REQUIRED
+          State whether QA needs to take action.
+
+          3. TEST CASE IMPACT
+          Explain whether existing test cases may need to be reviewed or changed.
+
+          4. RECOMMENDATION
+          Give the recommended QA action.
+
+          5. REASON
+          Briefly explain why.
+
+          Keep the response concise and practical for a software tester.
+          """
+
+          data = {
               "contents": [
                   {
                       "parts": [
                           {
-                              "text": (
-                                  "You are QA Sentinel. "
-                                  "Reply with exactly: "
-                                  "Gemini connection successful."
-                              )
+                              "text": prompt
                           }
                       ]
                   }
               ]
           }
 
-          data = json.dumps(payload).encode()
+          url = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              "models/gemini-3.8-flash:generateContent"
+              f"?key={api_key}"
+          )
 
           request = urllib.request.Request(
               url,
-              data=data,
+              data=json.dumps(data).encode("utf-8"),
               headers={"Content-Type": "application/json"},
               method="POST"
           )
 
-          try:
-              with urllib.request.urlopen(request, timeout=120) as response:
-                  result = json.load(response)
+          with urllib.request.urlopen(request) as response:
+              result = json.loads(response.read().decode("utf-8"))
 
-              answer = (
-                  result["candidates"][0]
-                  ["content"]["parts"][0]["text"]
-              )
+          answer = result["candidates"][0]["content"]["parts"][0]["text"]
 
-              print("========================================")
-              print("Gemini API Test")
-              print("========================================")
-              print()
-              print("Response from Gemini:")
-              print(answer)
-              print()
-              print("Gemini API connection successful.")
-              print("========================================")
-
-          except urllib.error.HTTPError as e:
-              body = e.read().decode(errors="replace")
-              print("Gemini API returned an error.")
-              print(f"HTTP status: {e.code}")
-              print(body)
-              raise SystemExit(1)
-
-          except Exception as e:
-              print(f"ERROR: {e}")
-              raise SystemExit(1)
+          print("========================================")
+          print("Gemini QA Analysis Test")
+          print("========================================")
+          print()
+          print(answer)
+          print()
+          print("========================================")
+          print("Gemini QA analysis completed.")
+          print("========================================")
           PYTHON
