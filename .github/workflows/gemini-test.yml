@@ -1,4 +1,4 @@
-name: Gemini QA Analysis Test
+name: Gemini API Diagnostic Test
 
 on:
   workflow_dispatch:
@@ -8,13 +8,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Gemini QA Analysis
+      - name: Test Gemini API
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python3 - <<'PYTHON'
           import json
           import os
+          import time
           import urllib.request
           import urllib.error
 
@@ -26,26 +27,16 @@ jobs:
               f"?key={API_KEY}"
           )
 
-          prompt = """
-          You are QA Sentinel.
-
-          A Jira acceptance criterion changed from:
-
-          "The customer must provide a phone number."
-
-          to:
-
-          "The customer no longer needs to provide a phone number."
-
-          In one or two sentences, explain what this change means for QA.
-          """
-
           payload = {
               "contents": [
                   {
                       "parts": [
                           {
-                              "text": prompt
+                              "text": (
+                                  "You are QA Sentinel. "
+                                  "Reply with exactly: "
+                                  "Gemini connection successful."
+                              )
                           }
                       ]
                   }
@@ -57,12 +48,36 @@ jobs:
           request = urllib.request.Request(
               url,
               data=data,
-              headers={"Content-Type": "application/json"},
+              headers={
+                  "Content-Type": "application/json"
+              },
               method="POST"
           )
 
+          print("========================================")
+          print("Gemini API Diagnostic Test")
+          print("========================================")
+          print()
+          print("Testing Gemini API...")
+          print("Model: gemini-3.8-flash")
+          print("API: generateContent")
+          print("Timeout: 30 seconds")
+          print()
+
+          start_time = time.time()
+
           try:
-              with urllib.request.urlopen(request, timeout=30) as response:
+              with urllib.request.urlopen(
+                  request,
+                  timeout=30
+              ) as response:
+
+                  elapsed = time.time() - start_time
+
+                  print(f"HTTP status: {response.status}")
+                  print(f"Response time: {elapsed:.2f} seconds")
+                  print()
+
                   result = json.load(response)
 
               answer = (
@@ -70,27 +85,36 @@ jobs:
                   ["content"]["parts"][0]["text"]
               )
 
-              print("========================================")
-              print("Gemini QA Analysis Test")
-              print("========================================")
-              print()
               print("Response from Gemini:")
               print(answer)
               print()
               print("========================================")
-              print("Gemini QA analysis completed.")
+              print("Gemini API connection successful.")
               print("========================================")
 
           except urllib.error.HTTPError as e:
-              body = e.read().decode(errors="replace")
 
-              print("Gemini API returned an error.")
+              elapsed = time.time() - start_time
+
+              print("Gemini API returned an HTTP error.")
               print(f"HTTP status: {e.code}")
+              print(f"Response time: {elapsed:.2f} seconds")
+              print()
+
+              body = e.read().decode(errors="replace")
+              print("Gemini response:")
               print(body)
 
               raise SystemExit(1)
 
           except Exception as e:
+
+              elapsed = time.time() - start_time
+
+              print("Gemini request failed.")
+              print(f"Response time: {elapsed:.2f} seconds")
+              print(f"ERROR TYPE: {type(e).__name__}")
               print(f"ERROR: {e}")
+
               raise SystemExit(1)
           PYTHON
