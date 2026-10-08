@@ -1,4 +1,4 @@
-name: Gemini API Diagnostic Test
+name: Gemini QA Analysis Test
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Gemini API
+      - name: Test Gemini QA Analysis
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -27,16 +27,26 @@ jobs:
               f"?key={API_KEY}"
           )
 
+          prompt = """
+          You are QA Sentinel.
+
+          A Jira acceptance criterion changed from:
+
+          "The customer must provide a phone number."
+
+          to:
+
+          "The customer no longer needs to provide a phone number."
+
+          In one or two sentences, explain what this change means for QA.
+          """
+
           payload = {
               "contents": [
                   {
                       "parts": [
                           {
-                              "text": (
-                                  "You are QA Sentinel. "
-                                  "Reply with exactly: "
-                                  "Gemini connection successful."
-                              )
+                              "text": prompt
                           }
                       ]
                   }
@@ -55,13 +65,13 @@ jobs:
           )
 
           print("========================================")
-          print("Gemini API Diagnostic Test")
+          print("Gemini QA Analysis Test")
           print("========================================")
           print()
           print("Testing Gemini API...")
           print("Model: gemini-3.8-flash")
           print("API: generateContent")
-          print("Timeout: 30 seconds")
+          print("Timeout: 60 seconds")
           print()
 
           start_time = time.time()
@@ -69,7 +79,7 @@ jobs:
           try:
               with urllib.request.urlopen(
                   request,
-                  timeout=30
+                  timeout=60
               ) as response:
 
                   elapsed = time.time() - start_time
@@ -89,7 +99,7 @@ jobs:
               print(answer)
               print()
               print("========================================")
-              print("Gemini API connection successful.")
+              print("Gemini QA analysis completed.")
               print("========================================")
 
           except urllib.error.HTTPError as e:
