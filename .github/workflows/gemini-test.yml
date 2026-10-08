@@ -1,4 +1,4 @@
-name: Gemini QA Analysis Test
+name: Gemini Real Jira Change Test
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Gemini QA Analysis
+      - name: Send Real Jira Change to Gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -28,17 +28,32 @@ jobs:
           )
 
           prompt = """
-          You are QA Sentinel.
+          You are QA Sentinel, an AI assistant for software testers.
 
-          A Jira acceptance criterion changed from:
+          Analyse the following real Jira change from a QA perspective.
 
-          "The customer must provide a phone number."
+          Jira Issue:
+          KAN-175 - Choose account type and enter contact details
 
-          to:
+          Field changed:
+          Description
 
-          "The customer no longer needs to provide a phone number."
+          BEFORE:
+          It has been agreed that the last point is no longer relevant.
+          Please inform Jones to update the document.
 
-          In one or two sentences, explain what this change means for QA.
+          AFTER:
+          It has now been agreed that it is relevant.
+          Please inform Jones to update the document.
+
+          Please provide:
+
+          1. What changed in the requirement or expected behaviour?
+          2. What is the likely QA impact?
+          3. What should a tester verify?
+
+          Keep the answer concise and practical.
+          Do not invent information that is not supported by the change.
           """
 
           payload = {
@@ -65,12 +80,12 @@ jobs:
           )
 
           print("========================================")
-          print("Gemini QA Analysis Test")
+          print("Gemini Real Jira Change Test")
           print("========================================")
           print()
-          print("Testing Gemini API...")
+          print("Sending real Jira change to Gemini...")
+          print("Issue: KAN-175")
           print("Model: gemini-3.8-flash")
-          print("API: generateContent")
           print("Timeout: 60 seconds")
           print()
 
@@ -95,7 +110,10 @@ jobs:
                   ["content"]["parts"][0]["text"]
               )
 
-              print("Response from Gemini:")
+              print("========================================")
+              print("Gemini QA Analysis")
+              print("========================================")
+              print()
               print(answer)
               print()
               print("========================================")
