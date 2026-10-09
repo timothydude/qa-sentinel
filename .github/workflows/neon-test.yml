@@ -1,0 +1,58 @@
+name: Neon Database Test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  neon-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Connect to Neon PostgreSQL
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import sys
+          import psycopg
+
+          print("========================================")
+          print("Neon Database Connection Test")
+          print("========================================")
+
+          database_url = os.environ.get("DATABASE_URL")
+
+          if not database_url:
+              print("ERROR: DATABASE_URL secret is missing.")
+              sys.exit(1)
+
+          try:
+              with psycopg.connect(
+                  database_url,
+                  connect_timeout=15
+              ) as connection:
+                  with connection.cursor() as cursor:
+                      cursor.execute(
+                          "SELECT version(), current_database()"
+                      )
+                      version, database = cursor.fetchone()
+
+                      print("Connection successful.")
+                      print(f"Database: {database}")
+                      print(f"PostgreSQL version: {version}")
+
+          except Exception as error:
+              print("ERROR: Database connection failed.")
+              print(f"Error type: {type(error).__name__}")
+              print("Check the DATABASE_URL secret and Neon settings.")
+              sys.exit(1)
+
+          print("========================================")
+          print("Neon connection test completed.")
+          print("========================================")
+          PYTHON
+        shell: bash
