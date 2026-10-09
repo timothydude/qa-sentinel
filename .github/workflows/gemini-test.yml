@@ -1,20 +1,28 @@
-name: Gemini Live Jira Analysis Test
+name: QA Sentinel Batch Analysis Test
 
 on:
   workflow_dispatch:
+    inputs:
+      hours:
+        description: "Look back this many hours"
+        required: true
+        default: "24"
+        type: string
 
 jobs:
-  jira-gemini-test:
+  batch-analysis:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
-      - name: Retrieve Jira change and analyse with Gemini
+      - name: Scan Jira and analyse relevant changes
         env:
           JIRA_URL: ${{ secrets.JIRA_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
+          HOURS: ${{ inputs.hours }}
         run: |
           python3 - <<'PYTHON'
           import os
@@ -24,38 +32,49 @@ jobs:
           import urllib.request
           import urllib.error
           from urllib.parse import quote
-
-          # Configuration
-          ISSUE_KEY = "KAN-175"
+          from datetime import datetime, timedelta, timezone
 
           JIRA_URL = os.environ["JIRA_URL"].rstrip("/")
           JIRA_EMAIL = os.environ["JIRA_EMAIL"]
-          JIRA_API_TOKEN = os.environ["JIRA_API_TOKEN"]
-          GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+          JIRA_TOKEN = os.environ["JIRA_API_TOKEN"]
+          GEMINI_KEY = os.environ["GEMINI_API_KEY"]
+          PROJECT = os.environ["JIRA_PROJECT_KEY"].strip()
+          HOURS = int(os.environ.get("HOURS", "24"))
 
-          # Jira authentication
+          if not PROJECT:
+              raise SystemExit("JIRA_PROJECT_KEY is empty.")
+
+          if HOURS < 1 or HOURS > 168:
+              raise SystemExit("Hours must be between 1 and 168.")
+
           credentials = base64.b64encode(
-              f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()
+              f"{JIRA_EMAIL}:{JIRA_TOKEN}".encode()
           ).decode()
 
           jira_headers = {
               "Authorization": f"Basic {credentials}",
-              "Accept": "application/json"
+              "Accept": "application/json",
+              "Content-Type": "application/json"
           }
 
-          def jira_get(url):
+          def get_json(url):
+              request = urllib.request.Request(
+                  url, headers=jira_headers
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          def post_json(url, payload):
               request = urllib.request.Request(
                   url,
-                  headers=jira_headers
+                  data=json.dumps(payload).encode(),
+                  headers=jira_headers,
+                  method="POST"
               )
-              with urllib.request.urlopen(
-                  request,
-                  timeout=30
-              ) as response:
+              with urllib.request.urlopen(request, timeout=30) as response:
                   return json.load(response)
 
           def to_text(value):
-              """Convert Jira text or Atlassian Document Format to readable text."""
               if value is None:
                   return ""
 
@@ -64,6 +83,8 @@ jobs:
                       parsed = json.loads(value)
                       if isinstance(parsed, dict):
                           value = parsed
+                      else:
+                          return value
                   except (ValueError, TypeError):
                       return value
 
@@ -77,200 +98,293 @@ jobs:
                   if value.get("type") == "text":
                       return value.get("text", "")
 
-                  parts = []
-                  for item in value.get("content", []):
-                      text = to_text(item)
-                      if text:
-                          parts.append(text)
-
-                  if value.get("type") in ("paragraph", "heading"):
-                      return "".join(parts) + "\n"
-
+                  parts = [
+                      to_text(item)
+                      for item in value.get("content", [])
+                  ]
                   return "".join(parts)
 
               return str(value)
 
-          print("========================================")
-          print("Live Jira + Gemini Test")
-          print("========================================")
-          print(f"Issue: {ISSUE_KEY}")
-          print()
+          def parse_date(value):
+              if not value:
+                  return None
+              try:
+                  return datetime.fromisoformat(
+                      value.replace("Z", "+00:00")
+                  ).astimezone(timezone.utc)
+              except (ValueError, TypeError):
+                  return None
 
-          # Step 1: Retrieve issue details
-          issue_url = (
-              f"{JIRA_URL}/rest/api/3/issue/"
-              f"{quote(ISSUE_KEY)}?fields=summary"
-          )
+          # Include fields likely to affect requirements or testing.
+          # Custom fields are included only when their names suggest
+          # requirements, acceptance criteria, or expected behaviour.
+          def is_relevant_field(item):
+              name = (
+                  item.get("field") or item.get("fieldId") or ""
+              ).strip().lower()
 
-          issue = jira_get(issue_url)
-          summary = issue["fields"]["summary"]
+              exact_fields = {
+                  "summary",
+                  "description",
+                  "environment",
+                  "labels",
+                  "priority",
+                  "components",
+                  "fix versions",
+                  "fix version",
+                  "versions",
+                  "version",
+                  "issuetype",
+                  "issue type"
+              }
 
-          print(f"Retrieved Jira issue: {ISSUE_KEY}")
-          print(f"Summary: {summary}")
-          print()
+              if name in exact_fields:
+                  return True
 
-          # Step 2: Retrieve the complete changelog in pages
-          changelog_url = (
-              f"{JIRA_URL}/rest/api/3/issue/"
-              f"{quote(ISSUE_KEY)}/changelog"
-          )
-
-          histories = []
-          start_at = 0
-
-          while True:
-              separator = "&" if "?" in changelog_url else "?"
-              page_url = (
-                  f"{changelog_url}{separator}"
-                  f"startAt={start_at}&maxResults=100"
+              keywords = (
+                  "acceptance",
+                  "requirement",
+                  "expected behaviour",
+                  "expected behavior",
+                  "business rule",
+                  "specification",
+                  "criteria"
               )
 
-              page = jira_get(page_url)
-              values = page.get("values", [])
-              histories.extend(values)
+              return any(word in name for word in keywords)
 
-              if page.get("isLast", False):
-                  break
+          def jira_changelog(issue_key):
+              url = (
+                  f"{JIRA_URL}/rest/api/3/issue/"
+                  f"{quote(issue_key)}/changelog"
+              )
 
-              if not values:
-                  break
+              histories = []
+              start_at = 0
 
-              start_at += len(values)
+              while True:
+                  page_url = (
+                      f"{url}?startAt={start_at}&maxResults=100"
+                  )
+                  page = get_json(page_url)
+                  values = page.get("values", [])
+                  histories.extend(values)
 
-              if start_at >= page.get("total", start_at):
-                  break
+                  if page.get("isLast", False) or not values:
+                      break
 
-          # Step 3: Find the most recent description change
-          description_changes = []
+                  start_at += len(values)
 
-          for history in histories:
-              for item in history.get("items", []):
-                  field_name = (
-                      item.get("fieldId") or item.get("field") or ""
-                  ).lower()
+                  if start_at >= page.get("total", start_at):
+                      break
 
-                  if field_name == "description":
+              return histories
+
+          cutoff = datetime.now(timezone.utc) - timedelta(hours=HOURS)
+
+          print("=" * 44)
+          print("QA Sentinel Batch Analysis Test")
+          print("=" * 44)
+          print(f"Project: {PROJECT}")
+          print(f"Lookback window: {HOURS} hours")
+          print("Maximum issues to inspect: 10")
+          print("Maximum Gemini analyses: 5")
+          print()
+
+          # Step 1: Find recently updated issues.
+          jql = (
+              f'project = "{PROJECT}" '
+              f'AND updated >= -{HOURS}h '
+              "ORDER BY updated DESC"
+          )
+
+          search_url = f"{JIRA_URL}/rest/api/3/search/jql"
+
+          search_result = post_json(
+              search_url,
+              {
+                  "jql": jql,
+                  "maxResults": 10,
+                  "fields": ["summary", "updated"]
+              }
+          )
+
+          issues = search_result.get("issues", [])
+
+          print(f"Recently updated issues found: {len(issues)}")
+          print()
+
+          # Step 2: Inspect actual changelog entries.
+          candidates = []
+
+          for issue in issues:
+              key = issue["key"]
+              fields = issue.get("fields", {})
+              summary = fields.get("summary", "(no summary)")
+
+              print(f"Inspecting {key}: {summary}")
+
+              try:
+                  histories = jira_changelog(key)
+              except Exception as error:
+                  print(
+                      f"  Could not retrieve changelog: "
+                      f"{type(error).__name__}: {error}"
+                  )
+                  continue
+
+              changes = []
+
+              for history in histories:
+                  created = parse_date(history.get("created"))
+
+                  if created is None or created < cutoff:
+                      continue
+
+                  for item in history.get("items", []):
+                      if not is_relevant_field(item):
+                          continue
+
                       before = to_text(item.get("fromString"))
                       after = to_text(item.get("toString"))
 
-                      if before != after:
-                          description_changes.append({
-                              "date": history.get("created", "Unknown"),
-                              "author": (
-                                  history.get("author", {}).get("displayName")
-                                  or "Unknown"
-                              ),
-                              "before": before,
-                              "after": after
-                          })
+                      if before == after:
+                          continue
 
-          if not description_changes:
+                      changes.append({
+                          "date": history.get("created", "Unknown"),
+                          "author": (
+                              history.get("author", {}).get("displayName")
+                              or "Unknown"
+                          ),
+                          "field": (
+                              item.get("field")
+                              or item.get("fieldId")
+                              or "Unknown"
+                          ),
+                          "before": before,
+                          "after": after
+                      })
+
+              if changes:
+                  candidates.append({
+                      "key": key,
+                      "summary": summary,
+                      "changes": changes
+                  })
+                  print(f"  Relevant changes found: {len(changes)}")
+              else:
+                  print("  No matching changes in the time window.")
+
+          print()
+          print(f"Issues with relevant changes: {len(candidates)}")
+
+          # Step 3: Limit Gemini usage.
+          selected = candidates[:5]
+
+          if len(candidates) > len(selected):
               print(
-                  "No description change with readable before/after "
-                  "values was found in this issue's changelog."
+                  f"Only the first {len(selected)} issues will be "
+                  "sent to Gemini in this run."
               )
-              print(
-                  "The workflow will stop rather than invent a change."
-              )
-              raise SystemExit(1)
 
-          change = max(
-              description_changes,
-              key=lambda entry: entry["date"]
-          )
+          if not selected:
+              print()
+              print("No matching changes to analyse.")
+              print("No Gemini API calls were made.")
+              print("=" * 44)
+              print("Batch scan completed.")
+              print("=" * 44)
+              raise SystemExit(0)
 
-          print("Latest description change retrieved from Jira:")
-          print(f"Date: {change['date']}")
-          print(f"Author: {change['author']}")
-          print()
-          print("BEFORE:")
-          print(change["before"] or "(empty)")
-          print()
-          print("AFTER:")
-          print(change["after"] or "(empty)")
-          print()
+          # Step 4: Analyse each selected issue.
+          for number, issue in enumerate(selected, start=1):
+              change_text = []
 
-          # Step 4: Send the actual Jira change to Gemini
-          prompt = f"""
-          You are QA Sentinel, an AI assistant for software testers.
+              for change in issue["changes"]:
+                  change_text.append(
+                      f"Date: {change['date']}\n"
+                      f"Author: {change['author']}\n"
+                      f"Field: {change['field']}\n"
+                      f"BEFORE:\n{change['before'] or '(empty)'}\n"
+                      f"AFTER:\n{change['after'] or '(empty)'}"
+                  )
 
-          Analyse this actual Jira description change.
+              prompt = f"""
+          You are QA Sentinel, an assistant for software testers.
 
-          Issue: {ISSUE_KEY} - {summary}
-          Change date: {change['date']}
+          Analyse these actual Jira changelog entries.
 
-          BEFORE:
-          {change['before'] or '(empty)'}
+          Issue: {issue['key']} - {issue['summary']}
 
-          AFTER:
-          {change['after'] or '(empty)'}
+          CHANGES:
+          {chr(10).join(change_text)}
 
           Explain:
-          1. What appears to have changed?
+          1. What changed?
           2. What is the likely QA impact?
           3. What should a tester verify or clarify?
 
-          Be concise and practical.
-          Distinguish confirmed facts from assumptions.
-          Do not invent missing requirements. If the text is ambiguous,
-          explicitly say what needs clarification.
+          Separate confirmed changes from assumptions.
+          Do not invent missing requirements.
+          If the change appears administrative or has no clear
+          functional impact, say so.
+          Keep the answer concise and practical.
           """
 
-          gemini_url = (
-              "https://generativelanguage.googleapis.com/v1beta/"
-              "models/gemini-3.8-flash:generateContent"
-              f"?key={GEMINI_API_KEY}"
-          )
+              payload = {
+                  "contents": [{
+                      "parts": [{"text": prompt}]
+                  }]
+              }
 
-          payload = {
-              "contents": [{
-                  "parts": [{"text": prompt}]
-              }]
-          }
+              gemini_url = (
+                  "https://generativelanguage.googleapis.com/v1beta/"
+                  "models/gemini-3.8-flash:generateContent"
+                  f"?key={GEMINI_KEY}"
+              )
 
-          request = urllib.request.Request(
-              gemini_url,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-              method="POST"
-          )
-
-          print("Sending the retrieved Jira change to Gemini...")
-          print("Timeout: 60 seconds")
-          print()
-
-          start_time = time.time()
-
-          try:
-              with urllib.request.urlopen(
-                  request,
-                  timeout=60
-              ) as response:
-                  result = json.load(response)
-                  print(f"Gemini HTTP status: {response.status}")
-
-              answer = (
-                  result["candidates"][0]
-                  ["content"]["parts"][0]["text"]
+              request = urllib.request.Request(
+                  gemini_url,
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
               )
 
               print()
-              print("========================================")
-              print("Gemini QA Analysis")
-              print("========================================")
-              print(answer)
-              print()
-              print("========================================")
-              print("Live Jira + Gemini test completed.")
-              print("========================================")
+              print("=" * 44)
+              print(f"Gemini analysis {number}/{len(selected)}")
+              print(f"Issue: {issue['key']} - {issue['summary']}")
+              print("=" * 44)
 
-          except urllib.error.HTTPError as error:
-              print(f"Gemini HTTP error: {error.code}")
-              print(error.read().decode(errors="replace"))
-              raise SystemExit(1)
+              try:
+                  start = time.time()
 
-          except Exception as error:
-              print(f"Error type: {type(error).__name__}")
-              print(f"Error: {error}")
-              raise SystemExit(1)
+                  with urllib.request.urlopen(
+                      request, timeout=60
+                  ) as response:
+                      result = json.load(response)
+                      print(f"Gemini HTTP status: {response.status}")
+
+                  answer = (
+                      result["candidates"][0]
+                      ["content"]["parts"][0]["text"]
+                  )
+
+                  print(f"Response time: {time.time() - start:.2f}s")
+                  print()
+                  print(answer)
+
+              except Exception as error:
+                  print(
+                      f"Gemini analysis failed for {issue['key']}: "
+                      f"{type(error).__name__}: {error}"
+                  )
+                  # Continue so one failure doesn't stop other issues.
+
+          print()
+          print("=" * 44)
+          print("Batch analysis finished.")
+          print("=" * 44)
           PYTHON
