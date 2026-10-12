@@ -14,7 +14,8 @@ on:
     branches:
       - test-gemini-api
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: neon-jira-change-tracking
