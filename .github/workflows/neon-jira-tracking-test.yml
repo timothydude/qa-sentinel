@@ -1,1 +1,273 @@
+name: Neon Jira Change Tracking Test
 
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "How many hours of Jira history to inspect"
+        required: true
+        default: "168"
+  push:
+    branches:
+      - test-gemini-api
+
+permissions: {}
+
+jobs:
+  track-jira-changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      JIRA_URL: ${{ secrets.JIRA_URL }}
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      JIRA_PROJECT_KEY: ${{ vars.JIRA_PROJECT_KEY }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      LOOKBACK_HOURS: ${{ inputs.hours || '168' }}
+
+    steps:
+      - name: Install PostgreSQL Python driver
+        run: python3 -m pip install "psycopg[binary]"
+
+      - name: Discover and record Jira changes
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import sys
+          import json
+          import base64
+          from datetime import datetime, timezone, timedelta
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError, URLError
+
+          import psycopg
+          from psycopg.types.json import Jsonb
+
+          print("========================================")
+          print("Neon Jira Change Tracking Test")
+          print("========================================")
+
+          jira_url = os.environ["JIRA_URL"].rstrip("/")
+          jira_email = os.environ["JIRA_EMAIL"]
+          jira_token = os.environ["JIRA_API_TOKEN"]
+          project_key = os.environ["JIRA_PROJECT_KEY"]
+          database_url = os.environ["DATABASE_URL"]
+
+          hours = int(os.environ["LOOKBACK_HOURS"])
+          if hours < 1 or hours > 2160:
+              raise ValueError(
+                  "Lookback hours must be between 1 and 2160."
+              )
+
+          required = {
+              "JIRA_URL": jira_url,
+              "JIRA_EMAIL": jira_email,
+              "JIRA_API_TOKEN": jira_token,
+              "JIRA_PROJECT_KEY": project_key,
+              "DATABASE_URL": database_url,
+          }
+
+          missing = [
+              name for name, value in required.items() if not value
+          ]
+          if missing:
+              print("ERROR: Missing configuration: " + ", ".join(missing))
+              sys.exit(1)
+
+          credentials = base64.b64encode(
+              f"{jira_email}:{jira_token}".encode()
+          ).decode()
+
+          headers = {
+              "Authorization": f"Basic {credentials}",
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+          }
+
+          def jira_request(path, payload=None):
+              url = jira_url + path
+
+              if payload is not None:
+                  data = json.dumps(payload).encode()
+                  request = Request(
+                      url, data=data, headers=headers, method="POST"
+                  )
+              else:
+                  request = Request(url, headers=headers)
+
+              try:
+                  with urlopen(request, timeout=30) as response:
+                      return json.loads(response.read().decode())
+              except HTTPError as error:
+                  raise RuntimeError(
+                      f"Jira API request failed with HTTP {error.code}"
+                  ) from None
+              except URLError as error:
+                  raise RuntimeError(
+                      "Jira API connection failed: "
+                      + type(error.reason).__name__
+                  ) from None
+
+          cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+          jql = (
+              f"project = {project_key} "
+              f"AND updated >= -{hours}h "
+              "ORDER BY updated DESC"
+          )
+
+          print(f"Project: {project_key}")
+          print(f"Lookback window: {hours} hours")
+          print("Maximum issues to inspect: 10")
+          print("Gemini calls: disabled")
+
+          # Search for up to 10 recently updated Jira issues.
+          search_result = jira_request(
+              "/rest/api/3/search/jql",
+              {
+                  "jql": jql,
+                  "maxResults": 10,
+                  "fields": ["summary", "updated"],
+              },
+          )
+
+          issues = search_result.get("issues", [])
+          print(f"Recently updated issues found: {len(issues)}")
+
+          new_count = 0
+          known_count = 0
+          out_of_window_count = 0
+          examined_count = 0
+
+          with psycopg.connect(
+              database_url, connect_timeout=15
+          ) as connection:
+              with connection.cursor() as cursor:
+                  for issue in issues:
+                      issue_key = issue["key"]
+                      summary = issue["fields"].get("summary", "")
+
+                      print(f"\nInspecting {issue_key}: {summary}")
+
+                      start_at = 0
+                      page_size = 100
+                      issue_changes = 0
+
+                      while True:
+                          page = jira_request(
+                              f"/rest/api/3/issue/{issue_key}/changelog"
+                              f"?{urlencode({
+                                  'startAt': start_at,
+                                  'maxResults': page_size
+                              })}"
+                          )
+
+                          histories = page.get(
+                              "values", page.get("histories", [])
+                          )
+
+                          if not histories:
+                              break
+
+                          for history in histories:
+                              created_text = history.get("created")
+                              if not created_text:
+                                  continue
+
+                              changed_at = datetime.fromisoformat(
+                                  created_text.replace("Z", "+00:00")
+                              )
+
+                              if changed_at.tzinfo is None:
+                                  changed_at = changed_at.replace(
+                                      tzinfo=timezone.utc
+                                  )
+
+                              if changed_at < cutoff:
+                                  out_of_window_count += 1
+                                  continue
+
+                              items = history.get("items", [])
+                              if not items:
+                                  continue
+
+                              changed_fields = [
+                                  {
+                                      "field": item.get("field"),
+                                      "fieldtype": item.get("fieldtype"),
+                                      "from": item.get("from"),
+                                      "fromString": item.get("fromString"),
+                                      "to": item.get("to"),
+                                      "toString": item.get("toString"),
+                                  }
+                                  for item in items
+                              ]
+
+                              examined_count += 1
+
+                              # The unique constraint prevents duplicate
+                              # issue/changelog pairs being stored.
+                              cursor.execute(
+                                  """
+                                  INSERT INTO jira_changes (
+                                      issue_key,
+                                      changelog_id,
+                                      changed_at,
+                                      changed_fields,
+                                      status
+                                  )
+                                  VALUES (%s, %s, %s, %s, 'pending')
+                                  ON CONFLICT (issue_key, changelog_id)
+                                  DO NOTHING
+                                  RETURNING id
+                                  """,
+                                  (
+                                      issue_key,
+                                      str(history["id"]),
+                                      changed_at,
+                                      Jsonb(changed_fields),
+                                  ),
+                              )
+
+                              inserted = cursor.fetchone()
+
+                              if inserted:
+                                  new_count += 1
+                                  issue_changes += 1
+                              else:
+                                  known_count += 1
+
+                          start_at += len(histories)
+                          total = page.get("total")
+
+                          if page.get("isLast") is True:
+                              break
+
+                          if total is not None and start_at >= total:
+                              break
+
+                          if len(histories) < page_size:
+                              break
+
+                      print(
+                          f"  Newly recorded changes: {issue_changes}"
+                      )
+
+          print("\n========================================")
+          print("Change Tracking Summary")
+          print("========================================")
+          print(f"Change entries examined: {examined_count}")
+          print(f"New changes recorded: {new_count}")
+          print(f"Previously recorded changes skipped: {known_count}")
+          print(
+              "Older changelog entries outside the window: "
+              f"{out_of_window_count}"
+          )
+          print("Gemini analyses performed: 0")
+          print("========================================")
+          print("Change tracking run completed.")
+          print("========================================")
+          PYTHON
