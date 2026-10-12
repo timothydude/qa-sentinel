@@ -1,0 +1,115 @@
+name: Neon Database Write Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test-gemini-api
+
+permissions: {}
+
+jobs:
+  neon-write-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Install PostgreSQL Python driver
+        run: python3 -m pip install "psycopg[binary]"
+
+      - name: Test database write and read
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import sys
+          import uuid
+          import psycopg
+
+          print("========================================")
+          print("Neon Database Write Test")
+          print("========================================")
+
+          database_url = os.environ.get("DATABASE_URL")
+
+          if not database_url:
+              print("ERROR: DATABASE_URL secret is missing.")
+              sys.exit(1)
+
+          test_issue = "TEST-" + uuid.uuid4().hex[:12]
+          test_changelog = "write-test-" + uuid.uuid4().hex
+
+          try:
+              with psycopg.connect(
+                  database_url,
+                  connect_timeout=15
+              ) as connection:
+                  with connection.cursor() as cursor:
+                      # Insert a temporary test record.
+                      cursor.execute(
+                          """
+                          INSERT INTO jira_changes
+                              (issue_key, changelog_id, status)
+                          VALUES (%s, %s, 'pending')
+                          RETURNING id, issue_key, changelog_id, status
+                          """,
+                          (test_issue, test_changelog)
+                      )
+
+                      record = cursor.fetchone()
+                      print("PASS: Record inserted.")
+                      print(f"Temporary issue key: {record[1]}")
+                      print(f"Status: {record[3]}")
+
+                      # Read the record back from PostgreSQL.
+                      cursor.execute(
+                          """
+                          SELECT issue_key, changelog_id, status
+                          FROM jira_changes
+                          WHERE id = %s
+                          """,
+                          (record[0],)
+                      )
+
+                      retrieved = cursor.fetchone()
+
+                      if retrieved is None:
+                          raise RuntimeError(
+                              "Inserted record could not be retrieved."
+                          )
+
+                      if retrieved != (
+                          test_issue, test_changelog, "pending"
+                      ):
+                          raise RuntimeError(
+                              "Retrieved record did not match."
+                          )
+
+                      print("PASS: Record retrieved and verified.")
+
+                      # Delete only this test record.
+                      cursor.execute(
+                          "DELETE FROM jira_changes WHERE id = %s",
+                          (record[0],)
+                      )
+
+                      if cursor.rowcount != 1:
+                          raise RuntimeError(
+                              "Temporary test record was not deleted."
+                          )
+
+                      print("PASS: Temporary record deleted.")
+
+              print("========================================")
+              print("SUCCESS: Database read/write test passed.")
+              print("No test record was left behind.")
+              print("========================================")
+
+          except Exception as error:
+              print("ERROR: Database test failed.")
+              print(f"Error type: {type(error).__name__}")
+              print("Check the workflow logs for details.")
+              sys.exit(1)
+          PYTHON
