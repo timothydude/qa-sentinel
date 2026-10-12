@@ -328,7 +328,7 @@ jobs:
           try:
               connection = psycopg.connect(DATABASE_URL)
 
-              with connection:
+              with connection.transaction():
                   with connection.cursor() as cursor:
                       issues = get_recent_issues()
 
