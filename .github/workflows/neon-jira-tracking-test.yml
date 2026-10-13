@@ -365,7 +365,7 @@ jobs:
                       {"parts": [{"text": prompt}]}
                   ],
                   "generationConfig": {
-                      "maxOutputTokens": 2500
+                      "maxOutputTokens": 4000
                   },
               }
 
