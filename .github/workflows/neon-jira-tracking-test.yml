@@ -214,17 +214,37 @@ jobs:
 
           Analyse this change from a software testing perspective.
 
-          Identify:
-          1. What changed, in plain language.
-          2. Potential impacts on existing functionality or business rules.
-          3. Relevant regression-testing areas.
-          4. Ambiguities, contradictions, or missing acceptance criteria.
-          5. Questions for the product owner or business analyst, if needed.
+          Use these five sections:
 
-          Do not invent requirements or claim that a defect exists without
-          evidence. Distinguish confirmed facts from testing concerns.
-          If the change is too unclear to assess, say so.
-          Keep the response concise and actionable.
+          ### 1. What Changed
+          Explain the change in plain language. Distinguish the previous
+          value from the new value.
+
+          ### 2. Potential Impact
+          Explain possible effects on functionality, business rules,
+          acceptance criteria, and dependencies. Separate confirmed facts
+          from hypotheses.
+
+          ### 3. Regression Testing
+          Give specific, actionable test scenarios relevant to the change.
+
+          ### 4. Ambiguities and Missing Requirements
+          Identify unclear wording, contradictions, and missing acceptance
+          criteria. If none are evident, say so.
+
+          ### 5. Questions and Recommended Actions
+          List questions for the product owner or business analyst and
+          recommended QA follow-up. If no questions are necessary, say so.
+
+          Important rules:
+          - Complete all five sections.
+          - Finish every sentence and test scenario.
+          - Do not stop halfway through a section or list.
+          - Do not invent requirements or claim that a defect exists
+            without evidence.
+          - Distinguish confirmed facts from testing concerns.
+          - If the change is too unclear to assess, explain why.
+          - Keep the analysis concise but complete.
           """.strip()
 
               url = (
@@ -237,7 +257,7 @@ jobs:
                       {"parts": [{"text": prompt}]}
                   ],
                   "generationConfig": {
-                      "maxOutputTokens": 800
+                      "maxOutputTokens": 2500
                   },
               }
 
@@ -270,7 +290,36 @@ jobs:
                               "Gemini returned no response candidates."
                           )
 
-                      parts = candidates[0].get(
+                      candidate = candidates[0]
+                      finish_reason = candidate.get("finishReason")
+
+                      print(
+                          "  Gemini finish reason: "
+                          f"{finish_reason or 'not supplied'}"
+                      )
+
+                      usage = result.get("usageMetadata", {})
+                      output_tokens = usage.get("candidatesTokenCount")
+
+                      if output_tokens is not None:
+                          print(
+                              f"  Gemini output tokens: {output_tokens}"
+                          )
+
+                      if finish_reason == "MAX_TOKENS":
+                          raise RuntimeError(
+                              "Gemini reached its output-token limit. "
+                              "The incomplete response will not be saved "
+                              "as a completed analysis."
+                          )
+
+                      if finish_reason != "STOP":
+                          raise RuntimeError(
+                              "Gemini did not report a normal completion. "
+                              f"Finish reason: {finish_reason or 'missing'}"
+                          )
+
+                      parts = candidate.get(
                           "content", {}
                       ).get("parts", [])
 
