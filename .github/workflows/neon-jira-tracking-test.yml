@@ -51,6 +51,7 @@ jobs:
       - name: Track Jira changes and analyse with Gemini
         run: |
           python3 - <<'PYTHON'
+          import base64
           import json
           import os
           import socket
@@ -77,6 +78,7 @@ jobs:
           GEMINI_MODEL = os.environ.get(
               "GEMINI_MODEL", "gemini-3.8-flash"
           )
+
           MAX_ISSUES = 10
           MAX_GEMINI_RECORDS = 5
           MAX_DB_ATTEMPTS = 3
@@ -89,10 +91,6 @@ jobs:
               print("ERROR: Lookback hours must be a whole number.")
               sys.exit(1)
 
-          if HOURS < 1 or HOURS > 2160:
-              print("ERROR: Lookback hours must be between 1 and 2160.")
-              sys.exit(1)
-
           required = {
               "JIRA_URL": JIRA_URL,
               "JIRA_EMAIL": JIRA_EMAIL,
@@ -102,13 +100,19 @@ jobs:
               "GEMINI_API_KEY": GEMINI_API_KEY,
           }
 
-          missing = [name for name, value in required.items() if not value]
+          missing = [
+              name for name, value in required.items() if not value
+          ]
+
           if missing:
               print("ERROR: Missing configuration: " + ", ".join(missing))
               sys.exit(1)
 
-          now = datetime.now(timezone.utc)
-          cutoff = now - timedelta(hours=HOURS)
+          if HOURS < 1 or HOURS > 2160:
+              print("ERROR: Hours must be between 1 and 2160.")
+              sys.exit(1)
+
+          cutoff = datetime.now(timezone.utc) - timedelta(hours=HOURS)
 
           print(f"Project: {PROJECT_KEY}")
           print(f"Lookback window: {HOURS} hours")
@@ -118,10 +122,10 @@ jobs:
 
           def jira_get_json(path, params=None):
               url = f"{JIRA_URL}{path}"
+
               if params:
                   url += "?" + urlencode(params)
 
-              import base64
               credentials = base64.b64encode(
                   f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()
               ).decode()
@@ -138,27 +142,27 @@ jobs:
               with urlopen(request, timeout=30) as response:
                   return json.loads(response.read().decode("utf-8"))
 
-          def parse_jira_datetime(value):
+          def parse_datetime(value):
               if not value:
                   return None
 
-              parsed = datetime.fromisoformat(
+              result = datetime.fromisoformat(
                   value.replace("Z", "+00:00")
               )
 
-              if parsed.tzinfo is None:
-                  parsed = parsed.replace(tzinfo=timezone.utc)
+              if result.tzinfo is None:
+                  result = result.replace(tzinfo=timezone.utc)
 
-              return parsed.astimezone(timezone.utc)
+              return result.astimezone(timezone.utc)
 
           def get_recent_issues():
               jql = (
                   f'project = "{PROJECT_KEY}" '
-                  f'AND updated >= -{HOURS}h '
+                  f"AND updated >= -{HOURS}h "
                   "ORDER BY updated DESC"
               )
 
-              data = jira_get_json(
+              result = jira_get_json(
                   "/rest/api/3/search/jql",
                   {
                       "jql": jql,
@@ -167,15 +171,15 @@ jobs:
                   },
               )
 
-              return data.get("issues", [])
+              return result.get("issues", [])
 
           def get_issue_changelog(issue_key):
-              all_histories = []
+              histories = []
               start_at = 0
               page_size = 100
 
               while True:
-                  data = jira_get_json(
+                  result = jira_get_json(
                       f"/rest/api/3/issue/{issue_key}/changelog",
                       {
                           "startAt": start_at,
@@ -183,24 +187,21 @@ jobs:
                       },
                   )
 
-                  histories = data.get("values", [])
-                  all_histories.extend(histories)
+                  page = result.get("values", [])
+                  histories.extend(page)
 
-                  if data.get("isLast", False):
+                  if result.get("isLast", False) or not page:
                       break
 
-                  if not histories:
-                      break
+                  start_at += len(page)
+                  total = result.get("total")
 
-                  start_at += len(histories)
-
-                  total = data.get("total")
                   if total is not None and start_at >= total:
                       break
 
-              return all_histories
+              return histories
 
-          def gemini_analyse(issue_key, summary, changed_at, changed_fields):
+          def gemini_analyse(issue_key, summary, changed_at, changes):
               prompt = f"""
           You are a senior software QA analyst reviewing a Jira change.
 
@@ -209,21 +210,21 @@ jobs:
           Change timestamp (UTC): {changed_at.isoformat()}
 
           Changed fields and values:
-          {json.dumps(changed_fields, ensure_ascii=False, indent=2, default=str)}
+          {json.dumps(changes, ensure_ascii=False, indent=2, default=str)}
 
           Analyse this change from a software testing perspective.
 
-          Please identify:
+          Identify:
           1. What changed, in plain language.
-          2. Potential impact on existing functionality or business rules.
+          2. Potential impacts on existing functionality or business rules.
           3. Relevant regression-testing areas.
-          4. Possible ambiguities, contradictions, or missing acceptance criteria.
-          5. Suggested questions for the product owner or business analyst, if needed.
+          4. Ambiguities, contradictions, or missing acceptance criteria.
+          5. Questions for the product owner or business analyst, if needed.
 
-          Do not invent requirements or claim that a defect exists without evidence.
-          Clearly distinguish confirmed facts from reasonable testing concerns.
-          If the change is too small or unclear to assess, say so.
-          Keep the response concise and actionable for a QA tester.
+          Do not invent requirements or claim that a defect exists without
+          evidence. Distinguish confirmed facts from testing concerns.
+          If the change is too unclear to assess, say so.
+          Keep the response concise and actionable.
           """.strip()
 
               url = (
@@ -233,26 +234,20 @@ jobs:
 
               payload = {
                   "contents": [
-                      {
-                          "parts": [
-                              {"text": prompt}
-                          ]
-                      }
+                      {"parts": [{"text": prompt}]}
                   ],
                   "generationConfig": {
                       "maxOutputTokens": 800
                   },
               }
 
-              request_body = json.dumps(payload).encode("utf-8")
+              body = json.dumps(payload).encode("utf-8")
               last_error = None
 
-              # Three network attempts, with increasing waits between them.
-              # The API key is sent in a header, not included in the URL.
-              for attempt in range(1, len(RETRY_DELAYS) + 2):
+              for attempt in range(1, 4):
                   request = Request(
                       url,
-                      data=request_body,
+                      data=body,
                       headers={
                           "Content-Type": "application/json",
                           "x-goog-api-key": GEMINI_API_KEY,
@@ -269,16 +264,16 @@ jobs:
                           )
 
                       candidates = result.get("candidates", [])
+
                       if not candidates:
                           raise RuntimeError(
                               "Gemini returned no response candidates."
                           )
 
-                      parts = (
-                          candidates[0]
-                          .get("content", {})
-                          .get("parts", [])
-                      )
+                      parts = candidates[0].get(
+                          "content", {}
+                      ).get("parts", [])
+
                       answer = "\n".join(
                           part.get("text", "")
                           for part in parts
@@ -297,26 +292,31 @@ jobs:
                           f"Gemini API returned HTTP {exc.code}"
                       )
 
-                      # Retry only temporary service/rate-limit errors.
-                      if exc.code not in (408, 429, 500, 502, 503, 504):
+                      if exc.code not in (
+                          408, 429, 500, 502, 503, 504
+                      ):
                           raise last_error from exc
 
                   except (URLError, TimeoutError, socket.timeout) as exc:
                       last_error = RuntimeError(
-                          f"Gemini network error: {type(exc).__name__}"
+                          "Gemini network error: "
+                          f"{type(exc).__name__}"
                       )
 
-                  if attempt <= len(RETRY_DELAYS):
+                  if attempt < 3:
                       delay = RETRY_DELAYS[attempt - 1]
                       print(
-                          f"  Temporary Gemini error on network attempt "
-                          f"{attempt}/3. Retrying in {delay} seconds."
+                          f"  Temporary Gemini error on network "
+                          f"attempt {attempt}/3. Retrying in "
+                          f"{delay} seconds."
                       )
                       time.sleep(delay)
 
               raise last_error or RuntimeError(
                   "Gemini failed after all network attempts."
               )
+
+          connection = None
 
           new_changes = 0
           known_changes = 0
@@ -326,93 +326,102 @@ jobs:
           analyses_failed = 0
 
           try:
-              connection = psycopg.connect(DATABASE_URL)
+              # Autocommit prevents one failed SQL statement from leaving
+              # a transaction aborted for later statements.
+              connection = psycopg.connect(
+                  DATABASE_URL,
+                  autocommit=True,
+              )
 
-              with connection.transaction():
-                  with connection.cursor() as cursor:
-                      issues = get_recent_issues()
+              issues = get_recent_issues()
+              issue_summaries = {
+                  issue["key"]: issue.get("fields", {}).get(
+                      "summary", "(No summary)"
+                  )
+                  for issue in issues
+              }
 
-                      print(
-                          f"Recently updated issues found: {len(issues)}"
+              print(
+                  f"Recently updated issues found: {len(issues)}"
+              )
+
+              for issue in issues:
+                  issue_key = issue["key"]
+                  summary = issue_summaries[issue_key]
+
+                  print(f"\nInspecting {issue_key}: {summary}")
+
+                  histories = get_issue_changelog(issue_key)
+                  issue_new = 0
+
+                  for history in histories:
+                      changed_at = parse_datetime(
+                          history.get("created")
                       )
 
-                      for issue in issues:
-                          issue_key = issue["key"]
-                          fields = issue.get("fields", {})
-                          summary = fields.get("summary", "(No summary)")
+                      if changed_at is None:
+                          continue
 
-                          print(f"\nInspecting {issue_key}: {summary}")
+                      if changed_at < cutoff:
+                          older_changes += 1
+                          continue
 
-                          histories = get_issue_changelog(issue_key)
-                          issue_new = 0
+                      entries_examined += 1
+                      changed_fields = []
 
-                          for history in histories:
-                              created = parse_jira_datetime(
-                                  history.get("created")
+                      for item in history.get("items", []):
+                          changed_fields.append({
+                              "field": item.get("field"),
+                              "field_type": item.get("fieldtype"),
+                              "from": item.get("fromString"),
+                              "to": item.get("toString"),
+                          })
+
+                      if not changed_fields:
+                          continue
+
+                      with connection.cursor() as cursor:
+                          cursor.execute(
+                              """
+                              INSERT INTO jira_changes (
+                                  issue_key,
+                                  changelog_id,
+                                  changed_at,
+                                  changed_fields,
+                                  status,
+                                  attempt_count,
+                                  discovered_at
                               )
-
-                              if created is None:
-                                  continue
-
-                              if created < cutoff:
-                                  older_changes += 1
-                                  continue
-
-                              entries_examined += 1
-
-                              changed_fields = []
-                              for item in history.get("items", []):
-                                  changed_fields.append({
-                                      "field": item.get("field"),
-                                      "field_type": item.get("fieldtype"),
-                                      "from": item.get("fromString"),
-                                      "to": item.get("toString"),
-                                  })
-
-                              if not changed_fields:
-                                  continue
-
-                              cursor.execute(
-                                  """
-                                  INSERT INTO jira_changes (
-                                      issue_key,
-                                      changelog_id,
-                                      changed_at,
-                                      changed_fields,
-                                      status,
-                                      attempt_count,
-                                      discovered_at
-                                  )
-                                  VALUES (%s, %s, %s, %s, 'pending', 0, NOW())
-                                  ON CONFLICT (issue_key, changelog_id)
-                                  DO NOTHING
-                                  """,
-                                  (
-                                      issue_key,
-                                      str(history["id"]),
-                                      created,
-                                      Jsonb(changed_fields),
-                                  ),
+                              VALUES (
+                                  %s, %s, %s, %s, 'pending', 0, NOW()
                               )
+                              ON CONFLICT (issue_key, changelog_id)
+                              DO NOTHING
+                              """,
+                              (
+                                  issue_key,
+                                  str(history["id"]),
+                                  changed_at,
+                                  Jsonb(changed_fields),
+                              ),
+                          )
 
-                              if cursor.rowcount == 1:
-                                  new_changes += 1
-                                  issue_new += 1
-                              else:
-                                  known_changes += 1
+                          if cursor.rowcount == 1:
+                              new_changes += 1
+                              issue_new += 1
+                          else:
+                              known_changes += 1
 
-                          print(f"  Newly recorded changes: {issue_new}")
+                  print(f"  Newly recorded changes: {issue_new}")
 
-              # Commit discovery before calling Gemini. A Gemini outage
-              # must not undo the Jira change records already saved.
-              connection.commit()
-
+              # Select eligible records in a short, independent query.
               with connection.cursor() as cursor:
                   cursor.execute(
                       """
                       SELECT
                           id,
                           issue_key,
+                          changelog_id,
                           changed_at,
                           changed_fields,
                           COALESCE(attempt_count, 0)
@@ -426,8 +435,6 @@ jobs:
                   )
                   queued_records = cursor.fetchall()
 
-              connection.commit()
-
               print(
                   "\nEligible changes queued for Gemini: "
                   f"{len(queued_records)}"
@@ -436,6 +443,7 @@ jobs:
               for (
                   record_id,
                   issue_key,
+                  changelog_id,
                   changed_at,
                   changed_fields,
                   previous_attempts,
@@ -443,35 +451,29 @@ jobs:
                   attempt_number = previous_attempts + 1
 
                   print(
-                      f"\nAnalysing {issue_key}, change record {record_id} "
-                      f"(workflow attempt {attempt_number}/"
-                      f"{MAX_DB_ATTEMPTS})"
+                      f"\nAnalysing {issue_key}, change record "
+                      f"{record_id} (workflow attempt "
+                      f"{attempt_number}/{MAX_DB_ATTEMPTS})"
                   )
 
-                  # Record the attempt before the API call. If the runner
-                  # stops unexpectedly, the attempt is still accounted for.
+                  # Record the attempt in its own autocommitted statement.
                   with connection.cursor() as cursor:
                       cursor.execute(
                           """
                           UPDATE jira_changes
-                          SET attempt_count = COALESCE(attempt_count, 0) + 1,
+                          SET attempt_count =
+                                  COALESCE(attempt_count, 0) + 1,
                               last_error = NULL
                           WHERE id = %s
                           """,
                           (record_id,),
                       )
-                  connection.commit()
 
                   try:
                       analysis = gemini_analyse(
                           issue_key,
-                          next(
-                              (
-                                  item.get("fields", {}).get("summary")
-                                  for item in issues
-                                  if item.get("key") == issue_key
-                              ),
-                              "(Summary unavailable)",
+                          issue_summaries.get(
+                              issue_key, "(Summary unavailable)"
                           ),
                           changed_at,
                           changed_fields,
@@ -489,34 +491,72 @@ jobs:
                               """,
                               (analysis, record_id),
                           )
-                      connection.commit()
 
                       analyses_performed += 1
                       print("  Gemini analysis saved to Neon.")
                       print("  Analysis preview:")
-                      print("  " + analysis[:300].replace("\n", "\n  "))
+                      print(
+                          "  "
+                          + analysis[:300].replace("\n", "\n  ")
+                      )
 
                   except Exception as exc:
                       error_message = (
                           f"{type(exc).__name__}: {exc}"
                       )[:1000]
 
-                      with connection.cursor() as cursor:
-                          cursor.execute(
-                              """
-                              UPDATE jira_changes
-                              SET status = 'failed',
-                                  last_error = %s
-                              WHERE id = %s
-                              """,
-                              (error_message, record_id),
+                      # Persist the error separately from the failed API call.
+                      try:
+                          with connection.cursor() as cursor:
+                              cursor.execute(
+                                  """
+                                  UPDATE jira_changes
+                                  SET status = 'failed',
+                                      last_error = %s
+                                  WHERE id = %s
+                                  """,
+                                  (error_message, record_id),
+                              )
+
+                          analyses_failed += 1
+                          print(
+                              "  Gemini analysis failed: "
+                              f"{error_message}"
                           )
-                      connection.commit()
 
-                      analyses_failed += 1
-                      print(f"  Gemini analysis failed: {error_message}")
+                      except Exception as db_exc:
+                          print(
+                              "  ERROR saving failure status for record "
+                              f"{record_id}: {type(db_exc).__name__}: "
+                              f"{db_exc}"
+                          )
+                          raise
 
-              connection.close()
+              print("\n" + "=" * 40)
+              print("Change Tracking Summary")
+              print("=" * 40)
+              print(f"Change entries examined: {entries_examined}")
+              print(f"New changes recorded: {new_changes}")
+              print(
+                  "Previously recorded changes skipped: "
+                  f"{known_changes}"
+              )
+              print(
+                  "Older changelog entries outside the window: "
+                  f"{older_changes}"
+              )
+              print(f"Gemini analyses performed: {analyses_performed}")
+              print(f"Gemini analyses failed: {analyses_failed}")
+              print("=" * 40)
+
+              if analyses_failed:
+                  print(
+                      "Change tracking completed, but some Gemini "
+                      "analyses failed. Eligible failed records can "
+                      "be retried on a later run."
+                  )
+              else:
+                  print("Change tracking run completed successfully.")
 
           except Exception as exc:
               print(
@@ -525,22 +565,8 @@ jobs:
               )
               sys.exit(1)
 
-          print("\n" + "=" * 40)
-          print("Change Tracking Summary")
-          print("=" * 40)
-          print(f"Change entries examined: {entries_examined}")
-          print(f"New changes recorded: {new_changes}")
-          print(f"Previously recorded changes skipped: {known_changes}")
-          print(f"Older changelog entries outside the window: {older_changes}")
-          print(f"Gemini analyses performed: {analyses_performed}")
-          print(f"Gemini analyses failed: {analyses_failed}")
-          print("=" * 40)
+          finally:
+              if connection is not None and not connection.closed:
+                  connection.close()
 
-          if analyses_failed:
-              print(
-                  "Change tracking completed, but some Gemini analyses "
-                  "failed. Failed records remain in Neon for a later retry."
-              )
-          else:
-              print("Change tracking run completed successfully.")
           PYTHON
