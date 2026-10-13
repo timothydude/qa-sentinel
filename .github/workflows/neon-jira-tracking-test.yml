@@ -203,48 +203,156 @@ jobs:
 
           def gemini_analyse(issue_key, summary, changed_at, changes):
               prompt = f"""
-          You are a senior software QA analyst reviewing a Jira change.
+          You are a senior software QA analyst reviewing a specific
+          Jira change. Your job is to help a tester understand what
+          changed, what could be affected, and what should be tested.
 
-          Jira issue: {issue_key}
+          JIRA CONTEXT
+
+          Issue key: {issue_key}
           Summary: {summary}
           Change timestamp (UTC): {changed_at.isoformat()}
 
-          Changed fields and values:
+          CHANGE DATA
+
           {json.dumps(changes, ensure_ascii=False, indent=2, default=str)}
 
-          Analyse this change from a software testing perspective.
+          IMPORTANT CONTEXT LIMITATION
 
-          Use these five sections:
+          You are reviewing the supplied changelog entry, not necessarily
+          the complete Jira story, its current acceptance criteria, linked
+          issues, or the full history of the requirement.
+
+          The supplied data may contain only part of a description or
+          requirement. A previous value or new value may also be missing.
+
+          Do not assume that the supplied change data represents the
+          entire story. Do not claim that acceptance criteria were added,
+          removed, or contradicted unless the supplied evidence supports
+          that conclusion.
+
+          If additional story context is needed to confirm an issue,
+          explicitly state what information is missing.
+
+          ANALYSIS REQUIREMENTS
 
           ### 1. What Changed
-          Explain the change in plain language. Distinguish the previous
-          value from the new value.
+
+          - Identify the field or fields that changed.
+          - Explain the previous value and the new value accurately.
+          - Focus on the actual difference rather than rewriting the
+            entire requirement.
+          - Identify whether the change appears to affect a requirement,
+            acceptance criterion, validation rule, user interface,
+            workflow, dependency, or administrative note.
+          - If the significance is uncertain, say so.
+          - Never describe a suspected change as a confirmed fact.
 
           ### 2. Potential Impact
-          Explain possible effects on functionality, business rules,
-          acceptance criteria, and dependencies. Separate confirmed facts
-          from hypotheses.
 
-          ### 3. Regression Testing
-          Give specific, actionable test scenarios relevant to the change.
+          Assess potential effects on functionality, business rules,
+          acceptance criteria, integrations, data, validation,
+          error handling, and existing tests where relevant.
 
-          ### 4. Ambiguities and Missing Requirements
-          Identify unclear wording, contradictions, and missing acceptance
-          criteria. If none are evident, say so.
+          For each material impact, distinguish between:
+
+          - CONFIRMED: Directly supported by the supplied change data.
+          - POTENTIAL: A reasonable risk that requires verification.
+          - UNKNOWN: Cannot be assessed without additional information.
+
+          Do not list unrelated technical risks merely to make the
+          analysis appear comprehensive.
+
+          ### 3. Acceptance Criteria and Inconsistencies
+
+          Review the supplied change for evidence of:
+
+          - Acceptance criteria that were added, changed, or removed.
+          - Wording that could be interpreted in multiple ways.
+          - Conflicting statements or business rules.
+          - Missing expected behaviour or error handling.
+          - Dependencies or references that are unclear.
+          - Differences between the stated requirement and the
+            change being made.
+
+          For each concern, explain the exact wording or evidence
+          that raises it and why clarification may be needed.
+
+          Do not call something a contradiction merely because it
+          is unfamiliar or because additional context is unavailable.
+
+          If no concern is evident in the supplied data, say so.
+          Make clear that this does not prove the entire Jira story
+          is free of inconsistencies.
+
+          ### 4. Regression Testing
+
+          Recommend specific, actionable test scenarios relevant to
+          this change. Prioritise scenarios that verify changed
+          behaviour and protect existing behaviour from regression.
+
+          For each scenario, provide:
+
+          - Test ID: A short identifier such as TC-01.
+          - Priority: High, Medium, or Low, with a brief reason.
+          - Test objective: What the test is intended to verify.
+          - Preconditions or test data: What must be set up.
+          - Steps: The actions a tester should perform.
+          - Expected result: The observable outcome that should occur.
+          - Evidence basis: Whether the scenario is directly supported
+            by the change or is a potential risk that needs confirmation.
+
+          Include positive and negative cases when relevant.
+          Consider boundary conditions, validation failures, state
+          transitions, and existing functionality where appropriate.
+
+          Do not invent exact UI labels, APIs, data values, business
+          rules, or expected results that are not supported by the
+          supplied information. If an expected result is unknown,
+          identify it as requiring confirmation.
+
+          Avoid generic recommendations such as "perform regression
+          testing" without specifying what to test and what to verify.
+
+          Prefer a small set of high-value scenarios over a long list
+          of repetitive or speculative tests.
 
           ### 5. Questions and Recommended Actions
-          List questions for the product owner or business analyst and
-          recommended QA follow-up. If no questions are necessary, say so.
 
-          Important rules:
+          Provide prioritised follow-up actions for QA, the developer,
+          product owner, or business analyst as appropriate.
+
+          For each action:
+
+          - State the question or action clearly.
+          - Explain why it matters.
+          - Identify the appropriate owner where reasonably clear.
+          - Explain whether it blocks test design, execution, or sign-off.
+
+          Ask only questions that resolve a real uncertainty in the
+          supplied evidence. Do not ask questions already answered
+          by the change data.
+
+          Separate essential clarifications from optional improvements.
+          Do not invent people, documents, issue keys, or dependencies.
+
+          OVERALL RULES
+
           - Complete all five sections.
-          - Finish every sentence and test scenario.
-          - Do not stop halfway through a section or list.
-          - Do not invent requirements or claim that a defect exists
-            without evidence.
-          - Distinguish confirmed facts from testing concerns.
-          - If the change is too unclear to assess, explain why.
-          - Keep the analysis concise but complete.
+          - Use concise, professional language suitable for a QA team.
+          - Use the supplied previous and new values as the primary
+            evidence for describing the change.
+          - Separate confirmed facts from hypotheses and unknowns.
+          - Never claim that a defect exists without evidence.
+          - Never invent requirements or expected behaviour.
+          - Do not treat informal comments as formal acceptance criteria
+            unless the evidence supports that interpretation.
+          - Do not repeat the same finding in multiple sections unless
+            necessary to explain its testing implications.
+          - Finish every sentence, list item, and test scenario.
+          - If the supplied information is insufficient, explain
+            precisely what can and cannot be concluded.
+          - Return the analysis only, using the five headings above.
           """.strip()
 
               url = (
