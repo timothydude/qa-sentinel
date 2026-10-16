@@ -9,6 +9,11 @@ on:
         required: true
         default: "168"
         type: string
+      publish_reports:
+        description: "Publish completed QA reports as Jira comments"
+        required: true
+        default: false
+        type: boolean
 
   push:
     branches:
@@ -35,6 +40,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: gemini-3.8-flash
       LOOKBACK_HOURS: ${{ inputs.hours || '168' }}
+      PUBLISH_JIRA_REPORTS: ${{ inputs.publish_reports || 'false' }}
 
     steps:
       - name: Check out repository
@@ -53,6 +59,7 @@ jobs:
           python3 - <<'PYTHON'
           import base64
           import json
+          import re
           import os
           import socket
           import sys
@@ -75,6 +82,9 @@ jobs:
           PROJECT_KEY = os.environ["JIRA_PROJECT_KEY"].strip()
           DATABASE_URL = os.environ["DATABASE_URL"]
           GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+          PUBLISH_JIRA_REPORTS = (
+              os.environ.get("PUBLISH_JIRA_REPORTS", "false").lower() == "true"
+          )
           GEMINI_MODEL = os.environ.get(
               "GEMINI_MODEL", "gemini-3.8-flash"
           )
@@ -119,6 +129,10 @@ jobs:
           print(f"Maximum issues to inspect: {MAX_ISSUES}")
           print(f"Gemini model: {GEMINI_MODEL}")
           print("Gemini calls: enabled")
+          print(
+              "Jira report publishing: "
+              + ("enabled" if PUBLISH_JIRA_REPORTS else "disabled")
+          )
 
           def jira_get_json(path, params=None):
               url = f"{JIRA_URL}{path}"
@@ -141,6 +155,298 @@ jobs:
 
               with urlopen(request, timeout=30) as response:
                   return json.loads(response.read().decode("utf-8"))
+
+          def jira_post_json(path, payload):
+              credentials = base64.b64encode(
+                  f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()
+              ).decode()
+
+              request = Request(
+                  f"{JIRA_URL}{path}",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={
+                      "Authorization": f"Basic {credentials}",
+                      "Accept": "application/json",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+
+              with urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+
+          def inline_adf(text):
+              """Convert common Markdown inline emphasis to Atlassian Document Format."""
+              nodes = []
+              pattern = re.compile(r"(\*\*.+?\*\*|`.+?`|\*.+?\*)")
+              position = 0
+
+              for match in pattern.finditer(text):
+                  if match.start() > position:
+                      nodes.append({"type": "text", "text": text[position:match.start()]})
+
+                  token = match.group(0)
+                  if token.startswith("**"):
+                      nodes.append({
+                          "type": "text",
+                          "text": token[2:-2],
+                          "marks": [{"type": "strong"}],
+                      })
+                  elif token.startswith("`"):
+                      nodes.append({
+                          "type": "text",
+                          "text": token[1:-1],
+                          "marks": [{"type": "code"}],
+                      })
+                  else:
+                      nodes.append({
+                          "type": "text",
+                          "text": token[1:-1],
+                          "marks": [{"type": "em"}],
+                      })
+                  position = match.end()
+
+              if position < len(text):
+                  nodes.append({"type": "text", "text": text[position:]})
+
+              return nodes or [{"type": "text", "text": " "}]
+
+
+          def adf_paragraph(text):
+              return {"type": "paragraph", "content": inline_adf(text)}
+
+
+          def markdown_to_adf(markdown):
+              """Convert the report's common Markdown blocks into Jira ADF nodes."""
+              lines = markdown.replace("\r\n", "\n").split("\n")
+              blocks = []
+              i = 0
+
+              def table_cells(line):
+                  return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+              def make_table_cell(value, header=False):
+                  cell_type = "tableHeader" if header else "tableCell"
+                  return {
+                      "type": cell_type,
+                      "attrs": {"colspan": 1, "rowspan": 1},
+                      "content": [adf_paragraph(value)],
+                  }
+
+              while i < len(lines):
+                  line = lines[i].strip()
+
+                  if not line:
+                      i += 1
+                      continue
+
+                  heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+                  if heading:
+                      blocks.append({
+                          "type": "heading",
+                          "attrs": {"level": min(len(heading.group(1)), 6)},
+                          "content": inline_adf(heading.group(2).strip()),
+                      })
+                      i += 1
+                      continue
+
+                  # Markdown table: header row followed by a separator row.
+                  if (
+                      line.startswith("|")
+                      and i + 1 < len(lines)
+                      and re.match(r"^\s*\|?[\s:|-]+\|?\s*$", lines[i + 1])
+                      and "-" in lines[i + 1]
+                  ):
+                      header_cells = table_cells(line)
+                      rows = [{
+                          "type": "tableRow",
+                          "content": [make_table_cell(value, True) for value in header_cells],
+                      }]
+                      i += 2
+
+                      while i < len(lines) and lines[i].strip().startswith("|"):
+                          values = table_cells(lines[i].strip())
+                          # Keep each row aligned with the header column count.
+                          values = (values + [""] * len(header_cells))[:len(header_cells)]
+                          rows.append({
+                              "type": "tableRow",
+                              "content": [make_table_cell(value, False) for value in values],
+                          })
+                          i += 1
+
+                      blocks.append({
+                          "type": "table",
+                          "attrs": {"isNumberColumnEnabled": False, "layout": "default"},
+                          "content": rows,
+                      })
+                      continue
+
+                  if re.match(r"^[-*+]\s+", line):
+                      items = []
+                      while i < len(lines) and re.match(r"^\s*[-*+]\s+", lines[i]):
+                          item_text = re.sub(r"^\s*[-*+]\s+", "", lines[i]).strip()
+                          if item_text.startswith("[ ] "):
+                              item_text = "☐ " + item_text[4:]
+                          elif item_text.startswith("[x] ") or item_text.startswith("[X] "):
+                              item_text = "☑ " + item_text[4:]
+                          items.append({
+                              "type": "listItem",
+                              "content": [adf_paragraph(item_text)],
+                          })
+                          i += 1
+                      blocks.append({"type": "bulletList", "content": items})
+                      continue
+
+                  if re.match(r"^\d+[.)]\s+", line):
+                      items = []
+                      while i < len(lines) and re.match(r"^\s*\d+[.)]\s+", lines[i]):
+                          item_text = re.sub(r"^\s*\d+[.)]\s+", "", lines[i]).strip()
+                          items.append({
+                              "type": "listItem",
+                              "content": [adf_paragraph(item_text)],
+                          })
+                          i += 1
+                      blocks.append({"type": "orderedList", "content": items})
+                      continue
+
+                  if re.match(r"^([-*_]\s*){3,}$", line):
+                      blocks.append({"type": "rule"})
+                      i += 1
+                      continue
+
+                  # Join wrapped lines into a single paragraph, stopping at the next block.
+                  paragraph_lines = [line]
+                  i += 1
+                  while i < len(lines):
+                      next_line = lines[i].strip()
+                      if (
+                          not next_line
+                          or re.match(r"^#{1,6}\s+", next_line)
+                          or re.match(r"^[-*+]\s+", next_line)
+                          or re.match(r"^\d+[.)]\s+", next_line)
+                          or next_line.startswith("|")
+                          or re.match(r"^([-*_]\s*){3,}$", next_line)
+                      ):
+                          break
+                      paragraph_lines.append(next_line)
+                      i += 1
+
+                  blocks.append(adf_paragraph(" ".join(paragraph_lines)))
+
+              return blocks or [adf_paragraph("No report content was supplied.")]
+
+
+          def adf_text(value):
+              """Flatten ADF nodes to text so previously published markers can be found."""
+              if isinstance(value, dict):
+                  pieces = []
+                  if value.get("type") == "text":
+                      pieces.append(value.get("text", ""))
+                  for child in value.get("content", []) or []:
+                      pieces.append(adf_text(child))
+                  return " ".join(piece for piece in pieces if piece)
+              if isinstance(value, list):
+                  return " ".join(adf_text(item) for item in value)
+              return ""
+
+
+          def find_existing_report_comment(issue_key, marker):
+              start_at = 0
+              while True:
+                  result = jira_get_json(
+                      f"/rest/api/3/issue/{issue_key}/comment",
+                      {"startAt": start_at, "maxResults": 100, "orderBy": "-created"},
+                  )
+                  comments = result.get("comments", [])
+
+                  for comment in comments:
+                      if marker in adf_text(comment.get("body", {})):
+                          return str(comment.get("id", "")) or None
+
+                  start_at += len(comments)
+                  total = result.get("total", start_at)
+                  if not comments or start_at >= total:
+                      return None
+
+
+          def publish_analysis_to_jira(record_id, issue_key, changelog_id, changed_at, analysis):
+              marker = f"QA-SENTINEL-CHANGE-RECORD-{record_id}"
+
+              # Recover safely if Jira accepted a comment but the database update failed.
+              existing_comment_id = find_existing_report_comment(issue_key, marker)
+              if existing_comment_id:
+                  with connection.cursor() as cursor:
+                      cursor.execute(
+                          """
+                          UPDATE jira_changes
+                          SET jira_comment_id = %s,
+                              jira_published_at = COALESCE(jira_published_at, NOW())
+                          WHERE id = %s
+                          """,
+                          (existing_comment_id, record_id),
+                      )
+                  print(f"  Existing Jira report found; linked comment {existing_comment_id}.")
+                  return
+
+              issue_data = jira_get_json(
+                  f"/rest/api/3/issue/{issue_key}",
+                  {"fields": "summary"},
+              )
+              summary = issue_data.get("fields", {}).get("summary", "(Summary unavailable)")
+              report_title = f"QA Change Impact Report — {issue_key}"
+              marker_text = (
+                  f"{marker} | Changelog {changelog_id} | "
+                  f"Change time UTC: {changed_at.isoformat()}"
+              )
+
+              content = [
+                  {
+                      "type": "heading",
+                      "attrs": {"level": 2},
+                      "content": inline_adf(report_title),
+                  },
+                  adf_paragraph(f"**Story:** {issue_key} — {summary}"),
+                  adf_paragraph(
+                      f"**Change record:** {record_id} | **Changed at (UTC):** "
+                      f"{changed_at.isoformat()}"
+                  ),
+                  {"type": "rule"},
+              ]
+              content.extend(markdown_to_adf(analysis))
+              content.extend([
+                  {"type": "rule"},
+                  adf_paragraph(f"Generated by QA Sentinel. {marker_text}"),
+              ])
+
+              result = jira_post_json(
+                  f"/rest/api/3/issue/{issue_key}/comment",
+                  {
+                      "body": {
+                          "type": "doc",
+                          "version": 1,
+                          "content": content,
+                      }
+                  },
+              )
+
+              comment_id = result.get("id")
+              if not comment_id:
+                  raise RuntimeError("Jira comment response did not contain a comment ID.")
+
+              # Store the Jira comment ID only after Jira confirms creation.
+              with connection.cursor() as cursor:
+                  cursor.execute(
+                      """
+                      UPDATE jira_changes
+                      SET jira_comment_id = %s,
+                          jira_published_at = NOW()
+                      WHERE id = %s
+                      """,
+                      (str(comment_id), record_id),
+                  )
+
+              print(f"  QA report published to Jira as comment {comment_id}.")
 
           def parse_datetime(value):
               if not value:
@@ -481,6 +787,8 @@ jobs:
           entries_examined = 0
           analyses_performed = 0
           analyses_failed = 0
+          reports_published = 0
+          report_publish_failed = 0
 
           try:
               # Autocommit prevents one failed SQL statement from leaving
@@ -489,6 +797,17 @@ jobs:
                   DATABASE_URL,
                   autocommit=True,
               )
+
+              # Add publication-tracking columns if this is the first run
+              # with Jira report publishing enabled.
+              with connection.cursor() as cursor:
+                  cursor.execute(
+                      """
+                      ALTER TABLE jira_changes
+                      ADD COLUMN IF NOT EXISTS jira_comment_id text,
+                      ADD COLUMN IF NOT EXISTS jira_published_at timestamptz
+                      """
+                  )
 
               issues = get_recent_issues()
               issue_summaries = {
@@ -689,6 +1008,67 @@ jobs:
                           )
                           raise
 
+              # Publish only when explicitly enabled in workflow_dispatch.
+              # This prevents a normal push to the test branch from posting
+              # comments to Jira unexpectedly.
+              if PUBLISH_JIRA_REPORTS:
+                  with connection.cursor() as cursor:
+                      cursor.execute(
+                          """
+                          SELECT
+                              id,
+                              issue_key,
+                              changelog_id,
+                              changed_at,
+                              gemini_analysis
+                          FROM jira_changes
+                          WHERE status = 'completed'
+                            AND gemini_analysis IS NOT NULL
+                            AND jira_comment_id IS NULL
+                          ORDER BY changed_at ASC, id ASC
+                          LIMIT %s
+                          """,
+                          (MAX_GEMINI_RECORDS,),
+                      )
+                      reports_to_publish = cursor.fetchall()
+
+                  print(
+                      "\nCompleted analyses waiting for Jira publication: "
+                      f"{len(reports_to_publish)}"
+                  )
+
+                  for (
+                      record_id,
+                      issue_key,
+                      changelog_id,
+                      changed_at,
+                      analysis,
+                  ) in reports_to_publish:
+                      print(
+                          f"\nPublishing QA report for {issue_key}, "
+                          f"change record {record_id}"
+                      )
+                      try:
+                          publish_analysis_to_jira(
+                              record_id,
+                              issue_key,
+                              changelog_id,
+                              changed_at,
+                              analysis,
+                          )
+                          reports_published += 1
+                      except Exception as exc:
+                          report_publish_failed += 1
+                          print(
+                              "  Jira report publication failed: "
+                              f"{type(exc).__name__}: {str(exc)[:500]}"
+                          )
+              else:
+                  print(
+                      "\nJira report publishing is disabled. "
+                      "No Jira comments will be created in this run."
+                  )
+
               print("\n" + "=" * 40)
               print("Change Tracking Summary")
               print("=" * 40)
@@ -704,13 +1084,15 @@ jobs:
               )
               print(f"Gemini analyses performed: {analyses_performed}")
               print(f"Gemini analyses failed: {analyses_failed}")
+              print(f"Jira reports published: {reports_published}")
+              print(f"Jira report publications failed: {report_publish_failed}")
               print("=" * 40)
 
-              if analyses_failed:
+              if analyses_failed or report_publish_failed:
                   print(
-                      "Change tracking completed, but some Gemini "
-                      "analyses failed. Eligible failed records can "
-                      "be retried on a later run."
+                      "Change tracking completed with some failures. "
+                      "Eligible Gemini analyses and unpublished Jira reports "
+                      "can be retried on a later run."
                   )
               else:
                   print("Change tracking run completed successfully.")
