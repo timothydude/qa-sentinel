@@ -509,9 +509,10 @@ jobs:
 
           def gemini_analyse(issue_key, summary, changed_at, changes):
               prompt = f"""
-          You are a senior software QA analyst reviewing a specific
-          Jira change. Your job is to help a tester understand what
-          changed, what could be affected, and what should be tested.
+          You are a senior software QA analyst reviewing one Jira changelog
+          entry. Produce a precise, evidence-led QA change impact report.
+          Help a tester decide what changed, what might be affected, and
+          what should be tested without inventing requirements.
 
           JIRA CONTEXT
 
@@ -523,142 +524,144 @@ jobs:
 
           {json.dumps(changes, ensure_ascii=False, indent=2, default=str)}
 
-          IMPORTANT CONTEXT LIMITATION
+          EVIDENCE AND CONTEXT LIMITATIONS
 
-          You are reviewing the supplied changelog entry, not necessarily
-          the complete Jira story, its current acceptance criteria, linked
-          issues, or the full history of the requirement.
+          You have the supplied changelog entry, not necessarily the full
+          current Jira story, all acceptance criteria, linked issues,
+          implementation, test results, or the complete requirement history.
+          A previous value or new value may be absent or incomplete.
 
-          The supplied data may contain only part of a description or
-          requirement. A previous value or new value may also be missing.
+          Treat the supplied changelog as evidence of what was edited, not
+          automatic proof of the intended business meaning or current code
+          behaviour. Never claim to have inspected code, executed tests, or
+          verified the live application.
 
-          Do not assume that the supplied change data represents the
-          entire story. Do not claim that acceptance criteria were added,
-          removed, or contradicted unless the supplied evidence supports
-          that conclusion.
+          Keep these categories distinct throughout the report:
+          - FACT / OBSERVED: Explicitly present in the supplied change data.
+          - INTERPRETATION: A plausible reading of the wording; label it as
+            an interpretation and explain the evidence behind it.
+          - POTENTIAL IMPACT: A reasonable risk that requires verification.
+          - UNKNOWN / CONFIRMATION NEEDED: Not determinable from the data.
 
-          If additional story context is needed to confirm an issue,
-          explicitly state what information is missing.
+          Do not promote an interpretation or potential impact to a confirmed
+          fact. If a conclusion depends on surrounding description text,
+          acceptance criteria, a linked story, or earlier changes not supplied,
+          say exactly what context is needed. Do not infer that an acceptance
+          criterion was formally added, removed, reinstated, or approved unless
+          the supplied evidence establishes that status. Informal notes can
+          suggest intent, but must not be presented as formal approval.
 
           ANALYSIS REQUIREMENTS
 
           ### 1. What Changed
 
-          - Identify the field or fields that changed.
-          - Explain the previous value and the new value accurately.
-          - Focus on the actual difference rather than rewriting the
-            entire requirement.
-          - Identify whether the change appears to affect a requirement,
-            acceptance criterion, validation rule, user interface,
-            workflow, dependency, or administrative note.
-          - If the significance is uncertain, say so.
-          - Never describe a suspected change as a confirmed fact.
+          - Identify the changed field(s) and accurately summarise the old and
+            new values. Quote short key phrases when useful.
+          - Describe the observable text/data change separately from its
+            possible meaning or business significance.
+          - Classify the change only where supported (for example: requirement
+            wording, acceptance criterion text, validation rule, dependency,
+            or administrative note).
+          - If a value is missing, do not reconstruct it; state that it is
+            unavailable.
 
           ### 2. Potential Impact
 
-          Assess potential effects on functionality, business rules,
-          acceptance criteria, integrations, data, validation,
-          error handling, and existing tests where relevant.
+          Assess only relevant possible effects on functionality, business
+          rules, acceptance criteria, UI, integrations, data, validation,
+          error handling, accessibility, and existing tests.
 
-          For each material impact, distinguish between:
+          For each material finding, use one of these labels:
+          - CONFIRMED FACT: directly evidenced by the changelog. This label
+            applies to the observed change, not unverified implementation impact.
+          - INTERPRETATION: likely meaning inferred from the wording.
+          - POTENTIAL: a risk or downstream effect that needs verification.
+          - UNKNOWN: cannot be assessed with the supplied information.
 
-          - CONFIRMED: Directly supported by the supplied change data.
-          - POTENTIAL: A reasonable risk that requires verification.
-          - UNKNOWN: Cannot be assessed without additional information.
-
-          Do not list unrelated technical risks merely to make the
-          analysis appear comprehensive.
+          Explain the evidence and avoid generic risks that are not relevant.
+          Do not claim that code must change unless implementation evidence
+          establishes that need.
 
           ### 3. Acceptance Criteria and Inconsistencies
 
-          Review the supplied change for evidence of:
-
-          - Acceptance criteria that were added, changed, or removed.
-          - Wording that could be interpreted in multiple ways.
-          - Conflicting statements or business rules.
-          - Missing expected behaviour or error handling.
-          - Dependencies or references that are unclear.
-          - Differences between the stated requirement and the
-            change being made.
-
-          For each concern, explain the exact wording or evidence
-          that raises it and why clarification may be needed.
-
-          Do not call something a contradiction merely because it
-          is unfamiliar or because additional context is unavailable.
-
-          If no concern is evident in the supplied data, say so.
-          Make clear that this does not prove the entire Jira story
-          is free of inconsistencies.
+          - Reference the exact acceptance-criterion wording only when it is
+            present in the supplied change data. If it is not present, identify
+            the criterion as an inferred reference and request the full story.
+          - Distinguish a literal change to acceptance-criterion text from a
+            note that appears to discuss a criterion's status.
+          - Do not state that a criterion is formally in or out of scope solely
+            because an informal note suggests that interpretation.
+          - Identify ambiguity, contradiction, missing behaviour, or unclear
+            dependencies only when there is specific supporting evidence.
+          - For every concern, provide the evidence, the practical ambiguity,
+            and the clarification needed.
+          - If none can be established from this change, say so and note that
+            the full story has not necessarily been assessed.
 
           ### 4. Regression Testing
 
-          Recommend specific, actionable test scenarios relevant to
-          this change. Prioritise scenarios that verify changed
-          behaviour and protect existing behaviour from regression.
+          Provide a small, prioritised set of specific test scenarios tied to
+          the changed behaviour. Use this structure for each test:
 
-          For each scenario, provide:
+          **TC-01 — Short test title**
+          - **Priority:** High / Medium / Low, with a brief rationale.
+          - **Traceability:** Quote the relevant supplied acceptance criterion
+            or identify the change record/field. If no criterion text is supplied,
+            say "Traceability requires confirmation"; do not invent an AC ID.
+          - **Evidence basis:** Directly supported / Derived test idea / Requires
+            confirmation, with a brief explanation.
+          - **Objective:** What behaviour is being checked.
+          - **Preconditions and test data:** Only supported details; mark any
+            proposed example data as illustrative, not as a specified rule.
+          - **Steps:** Number each action sequentially (1., 2., 3., etc.).
+          - **Expected result:** State observable outcomes supported by the
+            requirement. Separate any assumed outcomes under "Requires
+            confirmation" rather than presenting them as authoritative.
 
-          - Test ID: A short identifier such as TC-01.
-          - Priority: High, Medium, or Low, with a brief reason.
-          - Test objective: What the test is intended to verify.
-          - Preconditions or test data: What must be set up.
-          - Steps: The actions a tester should perform.
-          - Expected result: The observable outcome that should occur.
-          - Evidence basis: Whether the scenario is directly supported
-            by the change or is a potential risk that needs confirmation.
-
-          Include positive and negative cases when relevant.
-          Consider boundary conditions, validation failures, state
-          transitions, and existing functionality where appropriate.
-
-          Do not invent exact UI labels, APIs, data values, business
-          rules, or expected results that are not supported by the
-          supplied information. If an expected result is unknown,
-          identify it as requiring confirmation.
-
-          Avoid generic recommendations such as "perform regression
-          testing" without specifying what to test and what to verify.
-
-          Prefer a small set of high-value scenarios over a long list
-          of repetitive or speculative tests.
+          Number test cases sequentially (TC-01, TC-02, TC-03). Use numbered
+          lists for steps, and do not restart or repeat numbering within the
+          same list. Include positive, negative, and regression coverage only
+          where relevant. Prefer a few high-value scenarios over repetitive
+          tests. Do not invent UI labels, error messages, APIs, validation
+          limits, default values, business rules, or test outcomes. If an
+          example is needed but the specification does not define it, label
+          it illustrative and call out the rule that requires confirmation.
 
           ### 5. Questions and Recommended Actions
 
-          Provide prioritised follow-up actions for QA, the developer,
-          product owner, or business analyst as appropriate.
+          Give only useful follow-up actions, ordered by importance. For each:
+          - **Action / question:** Clear and specific.
+          - **Why it matters:** The risk or uncertainty it resolves.
+          - **Suggested owner:** QA, developer, product owner, BA, or another
+            role only when reasonably supported; do not invent a person's role.
+          - **Blocking status:** Blocks test design, execution, sign-off, or is
+            a non-blocking improvement. Explain briefly.
 
-          For each action:
+          Separate essential clarification from optional cleanup. Do not invent
+          people, documents, issue keys, or dependencies. If the changelog
+          mentions a person or document without enough context, state that the
+          identity or document is unverified.
 
-          - State the question or action clearly.
-          - Explain why it matters.
-          - Identify the appropriate owner where reasonably clear.
-          - Explain whether it blocks test design, execution, or sign-off.
+          REPORT FORMAT AND FINAL QUALITY CHECK
 
-          Ask only questions that resolve a real uncertainty in the
-          supplied evidence. Do not ask questions already answered
-          by the change data.
-
-          Separate essential clarifications from optional improvements.
-          Do not invent people, documents, issue keys, or dependencies.
-
-          OVERALL RULES
-
-          - Complete all five sections.
+          - Return exactly these five top-level Markdown headings, in order:
+            "### 1. What Changed", "### 2. Potential Impact",
+            "### 3. Acceptance Criteria and Inconsistencies",
+            "### 4. Regression Testing", and
+            "### 5. Questions and Recommended Actions".
           - Use concise, professional language suitable for a QA team.
-          - Use the supplied previous and new values as the primary
-            evidence for describing the change.
-          - Separate confirmed facts from hypotheses and unknowns.
-          - Never claim that a defect exists without evidence.
-          - Never invent requirements or expected behaviour.
-          - Do not treat informal comments as formal acceptance criteria
-            unless the evidence supports that interpretation.
-          - Do not repeat the same finding in multiple sections unless
-            necessary to explain its testing implications.
-          - Finish every sentence, list item, and test scenario.
-          - If the supplied information is insufficient, explain
-            precisely what can and cannot be concluded.
-          - Return the analysis only, using the five headings above.
+          - Keep observed facts, interpretations, potential risks, and unknowns
+            explicitly separate.
+          - Never claim a defect exists, a test passed, code was inspected, or
+            a requirement was formally approved unless evidence establishes it.
+          - Do not repeat the same finding in multiple sections unless needed
+            to explain its test implication.
+          - Ensure every list item and test case is complete and readable.
+          - Check that all test cases trace to supplied evidence or clearly say
+            traceability requires confirmation.
+          - Check that numbered lists are correctly sequenced and that no
+            unsupported expected result is written as a confirmed requirement.
+          - Return the report only. Do not add a preamble or a separate footer.
           """.strip()
 
               url = (
